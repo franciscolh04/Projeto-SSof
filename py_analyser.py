@@ -11,6 +11,33 @@ class VulnerabilityFinder(ast.NodeVisitor):
         self.tainted_vars = {}
         self.vulnerabilities = []
 
+        self.sources_map = {}
+        self.sinks_map = {}
+        self.sanitizers_map = {}
+
+        self._build_patterns_maps()
+
+    def _build_patterns_maps(self):
+        for pattern in self.patterns:
+            # Build sources map
+            for source_name in pattern.get("sources", []):
+                if source_name not in self.sources_map:
+                    self.sources_map[source_name] = []
+                self.sources_map[source_name].append(pattern)
+
+            # Build sanitizers map
+            for sanitizer_name in pattern.get("sanitizers", []):
+                if sanitizer_name not in self.sanitizers_map:
+                    self.sanitizers_map[sanitizer_name] = []
+                self.sanitizers_map[sanitizer_name].append(pattern)
+
+            # Build sinks map
+            for sink_name in pattern.get("sinks", []):
+                if sink_name not in self.sinks_map:
+                    self.sinks_map[sink_name] = []
+                self.sinks_map[sink_name].append(pattern)
+
+
 def parse_slice_file(slice_file_path):
     # Check if the file exists
     if not os.path.exists(slice_file_path):
