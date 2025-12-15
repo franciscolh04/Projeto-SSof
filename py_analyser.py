@@ -139,6 +139,49 @@ class VulnerabilityFinder(ast.NodeVisitor):
             elif target_name in self.tainted_vars:
                 del self.tainted_vars[target_name]
 
+    def visit_Call(self, node):
+        # Visit the call arguments to catch any nested calls
+        self.generic_visit(node)
+
+        # Get the function name being called
+        func_name = self._extract_node_name(node.func)
+
+        # Check if the function called is a sink
+        if func_name in self.sinks_map:
+            tainted_args = []
+            # Get tainted arguments passed to the sink
+            for arg in node.args:
+                tainted_args.extend(self._get_tainted_vars_from_node(arg))
+
+            # If no tainted arguments, return
+            if not tainted_args:
+                return
+
+            # For each tainted argument, check for vulnerabilities
+            for arg_name in tainted_args:
+                flows = self.tainted_vars.get(arg_name, [])
+
+                # Check each flow for matching patterns
+                for flow in flows:
+                    pattern = flow["pattern"]
+
+                    # If the sink matches the pattern, report vulnerability
+                    if func_name in pattern.get("sinks", []):
+                        vulnerability_report = {
+                            "vulnerability": pattern["vulnerability"],
+                            "source": flow["source"],
+                            "sink": [func_name, node.lineno],
+                            "flows": [
+                                [
+                                    "implicit" if flow["implicit"] else "explicit",
+                                    flow["sanitizers"]
+                                ]
+                            ]
+                        }
+
+                        # Avoid duplicate reports
+                        if vulnerability_report not in self.vulnerabilities:
+                            self.vulnerabilities.append(vulnerability_report)
 
 def parse_slice_file(slice_file_path):
     # Check if the file exists
@@ -200,7 +243,7 @@ def output_analysis_results(results, slice_file_path):
 
     # Write results to output file
     with open(output_file_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=4)
 
 
 def main():
