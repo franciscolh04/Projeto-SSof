@@ -8,8 +8,14 @@ OUTPUT_DIR = "./output"
 class VulnerabilityFinder(ast.NodeVisitor):
     def __init__(self, patterns):
         self.patterns = patterns
+        for i, p in enumerate(self.patterns):
+            p['_index'] = i
+
         self.tainted_vars = {}
         self.vulnerabilities = []
+        self.assigned_vars = set()
+
+        self.vuln_family_order = []
 
         self.sources_map = {}
         self.sinks_map = {}
@@ -52,25 +58,117 @@ class VulnerabilityFinder(ast.NodeVisitor):
             return self._extract_node_name(node.value)
         return None
     
-    def _get_tainted_vars_from_node(self, node):
+    def _sort_flows(self, flows):
+        def sort_key(flow):
+            vuln_name = flow['pattern']['vulnerability']
+            # If the vulnerability family is known, get its index
+            if vuln_name in self.vuln_family_order:
+                history_index = self.vuln_family_order.index(vuln_name)
+            else:
+                # If it's new, it goes to the end of the history (but before other new ones with a higher index)
+                history_index = len(self.vuln_family_order)
+            
+            # Use the index in the JSON file as a tiebreaker
+            json_index = flow['pattern']['_index']
+            
+            return (history_index, json_index)
+        
+        return sorted(flows, key=sort_key)
+    
+    def _get_flows_from_node(self, node):
+        flows = []
+        
         if isinstance(node, ast.Name):
-            return [node.id] if node.id in self.tainted_vars else []
+            var_name = node.id
+            
+            # If the variable is tainted, copy all its flows
+            if var_name in self.tainted_vars:
+                for flow in self.tainted_vars[var_name]:
+                    flows.append(flow.copy())
+
+            # Check if the variable is a Source itself
+            if var_name in self.sources_map:
+                for pattern in self.sources_map[var_name]:
+                    flows.append({
+                        "pattern": pattern,
+                        "source": [var_name, node.lineno],
+                        "sanitizers": [],
+                        "implicit": False
+                    })
+
+            # Check if it is a Non-Instantiated Variable (Implicit Source)
+            if var_name not in self.assigned_vars and var_name not in self.sources_map:
+                # Add as source for all patterns
+                for pattern in self.patterns:
+                    flows.append({
+                        "pattern": pattern,
+                        "source": [var_name, node.lineno],
+                        "sanitizers": [],
+                        "implicit": False
+                    })
+
         elif isinstance(node, ast.BinOp):
-            left_vars = self._get_tainted_vars_from_node(node.left)
-            right_vars = self._get_tainted_vars_from_node(node.right)
-            return left_vars + right_vars
+            flows.extend(self._get_flows_from_node(node.left))
+            flows.extend(self._get_flows_from_node(node.right))
+
         elif isinstance(node, ast.UnaryOp):
-            return self._get_tainted_vars_from_node(node.operand)
+            flows.extend(self._get_flows_from_node(node.operand))
+
         elif isinstance(node, ast.Call):
-            tainted_vars = []
             for arg in node.args:
-                tainted_vars.extend(self._get_tainted_vars_from_node(arg))
-            return tainted_vars
+                flows.extend(self._get_flows_from_node(arg))
+
         elif isinstance(node, ast.Attribute):
-            return self._get_tainted_vars_from_node(node.value)
+            flows.extend(self._get_flows_from_node(node.value)) 
+
         elif isinstance(node, ast.Subscript):
-            return self._get_tainted_vars_from_node(node.value)
-        return []
+            flows.extend(self._get_flows_from_node(node.value))
+
+        return flows
+    
+    def _report_vulnerability(self, sink_name, sink_lineno, flow):
+        pattern = flow['pattern']
+
+        # Keep track of vulnerability family order
+        vuln_name_base = pattern['vulnerability']
+        if vuln_name_base not in self.vuln_family_order:
+            self.vuln_family_order.append(vuln_name_base)
+
+        source_id = flow['source']
+        
+        # Check if this vulnerability has already been reported
+        for vuln in self.vulnerabilities:
+            if (vuln['vulnerability'].startswith(vuln_name_base) and 
+                vuln['source'] == source_id and 
+                vuln['sink'] == [sink_name, sink_lineno]):
+                
+                # Add new flow if it's not already present
+                new_flow_entry = [
+                    "implicit" if flow['implicit'] else "explicit",
+                    flow['sanitizers']
+                ]
+                if new_flow_entry not in vuln['flows']:
+                    vuln['flows'].append(new_flow_entry)
+                return
+
+        # If not found, create a new entry
+        if vuln_name_base not in self.vulnerability_count:
+            self.vulnerability_count[vuln_name_base] = 0
+        self.vulnerability_count[vuln_name_base] += 1
+        
+        # Create new vulnerability report entry and add to the list
+        vulnerability_report = {
+            "vulnerability": f"{vuln_name_base}_{self.vulnerability_count[vuln_name_base]}",
+            "source": flow['source'],
+            "sink": [sink_name, sink_lineno],
+            "flows": [
+                [
+                    "implicit" if flow['implicit'] else "explicit",
+                    flow['sanitizers']
+                ]
+            ]
+        }
+        self.vulnerabilities.append(vulnerability_report)
     
     def visit_Assign(self, node):
         # Visit the value to catch any nested assignments
@@ -82,81 +180,52 @@ class VulnerabilityFinder(ast.NodeVisitor):
         target_name = node.targets[0].id
         value_name = self._extract_node_name(node.value)
 
+        # Mark the variable as assigned to avoid implicit source detection
+        self.assigned_vars.add(target_name)
+
         # Initialize collected flows for this assignment
         collected_flows = []
 
-        # Check for tainted variables in the expression
-        tainted_in_expr = self._get_tainted_vars_from_node(node.value)
+        incoming_flows = self._get_flows_from_node(node.value)
 
-        if tainted_in_expr:
-            # If the value is a sanitizer
-            if value_name in self.sanitizers_map:
-                for arg_name in tainted_in_expr:
-                    source_flows = self.tainted_vars.get(arg_name, [])
-                    for flow in source_flows:
-                        new_flow = flow.copy()
-                        # If the sanitizer is part of the pattern, add it to the flow
-                        if value_name in new_flow["pattern"].get("sanitizers", []):
-                            new_flow["sanitizers"] = flow["sanitizers"] + [[value_name, node.lineno]]
-                        collected_flows.append(new_flow)
-            # If the value is not a sanitizer, propagate taintedness
-            else:
-                for var_name in tainted_in_expr:
-                    # Copy all flows from tainted variables
-                    for flow in self.tainted_vars.get(var_name, []):
-                        collected_flows.append(flow.copy())
+        # If the value is a sanitizer
+        if value_name in self.sanitizers_map:
+            for flow in incoming_flows:
+                # If the sanitizer is part of the pattern, add it to the flow
+                if value_name in flow["pattern"].get("sanitizers", []):
+                    flow["sanitizers"] = flow["sanitizers"] + [[value_name, node.lineno]]
+                collected_flows.append(flow)
+        else:
+            # If not a sanitizer, propagate the flows as they are
+            collected_flows.extend(incoming_flows)
 
-        # Check if the value assigned is from a source
+        # If the value assigned is from a source
         if value_name in self.sources_map:
-            # Create new taint flows for each pattern associated with the source
-            for pattern in self.sources_map[value_name]:
-                collected_flows.append(
-                    {
-                        "pattern": pattern,
-                        "source": [value_name, node.lineno],
-                        "sanitizers": [],
-                        "implicit": False
-                    }
-                )
+             for pattern in self.sources_map[value_name]:
+                collected_flows.append({
+                    "pattern": pattern,
+                    "source": [value_name, node.lineno],
+                    "sanitizers": [],
+                    "implicit": False
+                })
 
         # Assign the collected flows to the target variable
         if collected_flows:
             self.tainted_vars[target_name] = collected_flows
 
-            # If the target variable is a sink, check for vulnerabilities
+            # If the target variable is a sink
             if target_name in self.sinks_map:
-                # Check each flow for matching patterns
-                for flow in collected_flows:
-                    pattern = flow['pattern']
 
-                    if target_name in pattern.get('sinks', []):
-                        vulnerability = pattern['vulnerability']
-
-                        # Count occurrences of the vulnerability to append a unique suffix
-                        if vulnerability not in self.vulnerability_count:
-                            self.vulnerability_count[vulnerability] = 0
-                        self.vulnerability_count[vulnerability] += 1
-
-                        # Prepare the vulnerability report
-                        vulnerability_report = {
-                            "vulnerability": f"{vulnerability}_{self.vulnerability_count[vulnerability]}",
-                            "source": flow['source'],
-                            "sink": [target_name, node.lineno],
-                            "flows": [
-                                [
-                                    "implicit" if flow['implicit'] else "explicit",
-                                    flow['sanitizers']
-                                ]
-                            ]
-                        }
-
-                        # Avoid duplicate reports
-                        if vulnerability_report not in self.vulnerabilities:
-                            self.vulnerabilities.append(vulnerability_report)
+                sorted_flows = self._sort_flows(collected_flows)
+                for flow in sorted_flows:
+                    # Check each flow for matching patterns
+                    if target_name in flow['pattern'].get('sinks', []):
+                        self._report_vulnerability(target_name, node.lineno, flow)
 
         # If no tainted flows, remove the variable from tainted vars
         elif target_name in self.tainted_vars:
             del self.tainted_vars[target_name]
+
 
     def visit_Call(self, node):
         # Visit the call arguments to catch any nested calls
@@ -167,50 +236,24 @@ class VulnerabilityFinder(ast.NodeVisitor):
 
         # Check if the function called is a sink
         if func_name in self.sinks_map:
-            tainted_args = []
-            # Get tainted arguments passed to the sink
-            for arg in node.args:
-                tainted_args.extend(self._get_tainted_vars_from_node(arg))
+            all_flows = []
 
-            # If no tainted arguments, return
-            if not tainted_args:
+            # Collect flows from all arguments
+            for arg in node.args:
+                all_flows.extend(self._get_flows_from_node(arg))
+ 
+            if not all_flows:
                 return
 
-            # For each tainted argument, check for vulnerabilities
-            for arg_name in tainted_args:
-                flows = self.tainted_vars.get(arg_name, [])
-
-                # Check each flow for matching patterns
-                for flow in flows:
-                    pattern = flow["pattern"]
-
-                    # If the sink matches the pattern, report vulnerability
-                    if func_name in pattern.get("sinks", []):
-                        vulnerability = pattern['vulnerability']
-
-                        # Count occurrences of the vulnerability to append a unique suffix
-                        if vulnerability not in self.vulnerability_count:
-                            self.vulnerability_count[vulnerability] = 0
-                        self.vulnerability_count[vulnerability] += 1
-
-                        # Prepare the vulnerability report
-                        vulnerability_report = {
-                            "vulnerability": f"{vulnerability}_{self.vulnerability_count[vulnerability]}",
-                            "source": flow["source"],
-                            "sink": [func_name, node.lineno],
-                            "flows": [
-                                [
-                                    "implicit" if flow["implicit"] else "explicit",
-                                    flow["sanitizers"]
-                                ]
-                            ]
-                        }
-
-                        # Avoid duplicate reports
-                        if vulnerability_report not in self.vulnerabilities:
-                            self.vulnerabilities.append(vulnerability_report)
+            # Check each flow for matching patterns
+            sorted_flows = self._sort_flows(all_flows)
+            for flow in sorted_flows:
+                pattern = flow["pattern"]
+                if func_name in pattern.get("sinks", []):
+                    self._report_vulnerability(func_name, node.lineno, flow)
     
     def visit_Expr(self, node):
+        # Visit expressions to catch any nested calls or assignments
         self.generic_visit(node)
 
 def parse_slice_file(slice_file_path):
