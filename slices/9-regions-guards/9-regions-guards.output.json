@@ -1,0 +1,125 @@
+[
+    {
+        "vulnerability": "B_1",
+        "source": [
+            "b",
+            1
+        ],
+        "sink": [
+            "a",
+            1
+        ],
+        "flows": [
+            [
+                "explicit",
+                []
+            ]
+        ]
+    },
+    {
+        "vulnerability": "B_2",
+        "source": [
+            "b",
+            1
+        ],
+        "sink": [
+            "a",
+            11
+        ],
+        "flows": [
+            [
+                "explicit",
+                [
+                    [
+                        "s",
+                        11
+                    ]
+                ]
+            ],
+            [
+                "implicit",
+                [
+                    [
+                        "s",
+                        11
+                    ]
+                ]
+            ],
+            [
+                "implicit",
+                []
+            ]
+        ]
+    },
+    {
+        "vulnerability": "B_3",
+        "source": [
+            "b",
+            1
+        ],
+        "sink": [
+            "z",
+            12
+        ],
+        "flows": [
+            [
+                "implicit",
+                [
+                    [
+                        "s",
+                        5
+                    ]
+                ]
+            ],
+            [
+                "implicit",
+                []
+            ],
+            [
+                "implicit",
+                [
+                    [
+                        "s",
+                        5
+                    ],
+                    [
+                        "s",
+                        11
+                    ]
+                ]
+            ],
+            [
+                "implicit",
+                [
+                    [
+                        "s",
+                        11
+                    ]
+                ]
+            ]
+        ]
+    },
+    {
+        "vulnerability": "A_1",
+        "source": [
+            "d",
+            2
+        ],
+        "sink": [
+            "z",
+            12
+        ],
+        "flows": [
+            [
+                "implicit",
+                [
+                    [
+                        "s",
+                        5
+                    ]
+                ]
+            ]
+        ]
+    }
+] 
+

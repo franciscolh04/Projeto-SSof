@@ -1,0 +1,112 @@
+[
+    {
+        "vulnerability": "A_1",
+        "source": [
+            "b",
+            1
+        ],
+        "sink": [
+            "e",
+            2
+        ],
+        "flows": [
+            [
+                "explicit",
+                [
+                    [
+                        "f",
+                        2
+                    ]
+                ]
+            ]
+        ]
+    },
+    {
+        "vulnerability": "A_2",
+        "source": [
+            "b",
+            1
+        ],
+        "sink": [
+            "c",
+            2
+        ],
+        "flows": [
+            [
+                "explicit",
+                [
+                    [
+                        "f",
+                        2
+                    ]
+                ]
+            ],
+            [
+                "explicit",
+                []
+            ]
+        ]
+    },
+    {
+        "vulnerability": "A_3",
+        "source": [
+            "b",
+            1
+        ],
+        "sink": [
+            "e",
+            3
+        ],
+        "flows": [
+            [
+                "explicit",
+                [
+                    [
+                        "f",
+                        2
+                    ]
+                ]
+            ],
+            [
+                "explicit",
+                []
+            ]
+        ]
+    },
+    {
+        "vulnerability": "B_1",
+        "source": [
+            "b",
+            1
+        ],
+        "sink": [
+            "c",
+            2
+        ],
+        "flows": [
+            [
+                "explicit",
+                [
+                    [
+                        "e",
+                        2
+                    ],
+                    [
+                        "d",
+                        2
+                    ]
+                ]
+            ],
+            [
+                "explicit",
+                [
+                    [
+                        "d",
+                        2
+                    ]
+                ]
+            ]
+        ]
+    }
+] 
+
