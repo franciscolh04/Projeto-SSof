@@ -4,8 +4,8 @@ import os
 import sys
 
 OUTPUT_DIR = "./output"
-DEBUG = True
 DEBUG_DIR = "./debug"
+DEBUG = True
 DEBUG_FILE = None
 
 def debug_print(message):
@@ -15,8 +15,6 @@ def debug_print(message):
         DEBUG_FILE.flush()
 
 class VulnerabilityFinder(ast.NodeVisitor):
-    
-    
     def __init__(self, patterns):
         self.patterns = patterns
         for i, p in enumerate(self.patterns):
@@ -35,7 +33,7 @@ class VulnerabilityFinder(ast.NodeVisitor):
         self.vulnerability_count = {}
 
         self._build_patterns_maps()
-        
+
         if DEBUG:
             debug_print("[DEBUG] VulnerabilityFinder initialized with {} patterns".format(len(patterns)))
             debug_print("[DEBUG] Sources: {}".format(list(self.sources_map.keys())))
@@ -45,11 +43,11 @@ class VulnerabilityFinder(ast.NodeVisitor):
     def _build_patterns_maps(self):
         if DEBUG:
             debug_print("[DEBUG] Building pattern maps...")
-        
+
         for pattern in self.patterns:
             if DEBUG:
                 debug_print("[DEBUG]   Pattern: {}".format(pattern.get('vulnerability')))
-            
+
             # Build sources map
             for source_name in pattern.get("sources", []):
                 if source_name not in self.sources_map:
@@ -58,7 +56,7 @@ class VulnerabilityFinder(ast.NodeVisitor):
                 if DEBUG:
                     debug_print("[DEBUG]     Added source: {}".format(source_name))
 
-            # Build sanitizers map 
+            # Build sanitizers map
             for sanitizer_name in pattern.get("sanitizers", []):
                 if sanitizer_name not in self.sanitizers_map:
                     self.sanitizers_map[sanitizer_name] = []
@@ -86,16 +84,16 @@ class VulnerabilityFinder(ast.NodeVisitor):
                 result = f"{value_name}.{node.attr}"
         elif isinstance(node, ast.Subscript): # Subscript access
             result = self._extract_node_name(node.value)
-        
+
         if DEBUG and result:
             debug_print("[DEBUG]     Extracted node name: {} (type: {})".format(result, type(node).__name__))
-        
+
         return result
-    
+
     def _sort_flows(self, flows):
         if DEBUG:
             debug_print("[DEBUG]   Sorting {} flows...".format(len(flows)))
-        
+
         def sort_key(flow):
             vuln_name = flow['pattern']['vulnerability']
             # If the vulnerability family is known, get its index
@@ -104,31 +102,31 @@ class VulnerabilityFinder(ast.NodeVisitor):
             else:
                 # If it's new, it goes to the end of the history (but before other new ones with a higher index)
                 history_index = len(self.vuln_family_order)
-            
+
             # Use the index in the JSON file as a tiebreaker
             json_index = flow['pattern']['_index']
-            
+
             if DEBUG:
                 debug_print("[DEBUG]     Flow '{}' -> sort_key=({}, {})".format(vuln_name, history_index, json_index))
-            
+
             return (history_index, json_index)
-        
+
         sorted_flows = sorted(flows, key=sort_key)
-        
+
         if DEBUG:
             debug_print("[DEBUG]   Flows sorted")
-        
+
         return sorted_flows
-    
+
     def _get_flows_from_node(self, node):
         flows = []
-        
+
         if isinstance(node, ast.Name):
             var_name = node.id
-            
+
             if DEBUG:
                 debug_print("[DEBUG]     Getting flows from variable: {}".format(var_name))
-            
+
             # If the variable is tainted, copy all its flows
             if var_name in self.tainted_vars:
                 if DEBUG:
@@ -187,12 +185,12 @@ class VulnerabilityFinder(ast.NodeVisitor):
             if DEBUG:
                 debug_print("[DEBUG]     Getting flows from Subscript")
             flows.extend(self._get_flows_from_node(node.value))
-        
+
         if DEBUG:
             debug_print("[DEBUG]     Total flows collected: {}".format(len(flows)))
 
         return flows
-    
+
     def _report_vulnerability(self, sink_name, sink_lineno, flow):
         pattern = flow['pattern']
 
@@ -202,23 +200,23 @@ class VulnerabilityFinder(ast.NodeVisitor):
             self.vuln_family_order.append(vuln_name_base)
 
         source_id = flow['source']
-        
+
         if DEBUG:
             debug_print("[DEBUG] Reporting vulnerability: {} at line {}".format(vuln_name_base, sink_lineno))
             debug_print("[DEBUG]   Source: {}".format(source_id))
             debug_print("[DEBUG]   Sink: {}".format(sink_name))
             debug_print("[DEBUG]   Sanitizers: {}".format(flow['sanitizers']))
             debug_print("[DEBUG]   Implicit: {}".format(flow['implicit']))
-        
+
         # Check if this vulnerability has already been reported
         for vuln in self.vulnerabilities:
             if (vuln['vulnerability'].startswith(vuln_name_base) and 
                 vuln['source'] == source_id and 
                 vuln['sink'] == [sink_name, sink_lineno]):
-                
+
                 if DEBUG:
                     debug_print("[DEBUG]   Vulnerability already reported, checking for new flow...")
-                
+
                 # Add new flow if it's not already present
                 new_flow_entry = [
                     "implicit" if flow['implicit'] else "explicit",
@@ -237,12 +235,12 @@ class VulnerabilityFinder(ast.NodeVisitor):
         if vuln_name_base not in self.vulnerability_count:
             self.vulnerability_count[vuln_name_base] = 0
         self.vulnerability_count[vuln_name_base] += 1
-        
+
         vuln_id = f"{vuln_name_base}_{self.vulnerability_count[vuln_name_base]}"
-        
+
         if DEBUG:
             debug_print("[DEBUG]   Creating new vulnerability: {}".format(vuln_id))
-        
+
         # Create new vulnerability report entry and add to the list
         vulnerability_report = {
             "vulnerability": vuln_id,
@@ -256,10 +254,10 @@ class VulnerabilityFinder(ast.NodeVisitor):
             ]
         }
         self.vulnerabilities.append(vulnerability_report)
-        
+
         if DEBUG:
             debug_print("[DEBUG]   Total vulnerabilities: {}".format(len(self.vulnerabilities)))
-    
+
     def visit_Assign(self, node):
         # Visit the value to catch any nested assignments
         self.generic_visit(node)
@@ -281,9 +279,9 @@ class VulnerabilityFinder(ast.NodeVisitor):
 
         if DEBUG:
             debug_print("[DEBUG]   Getting incoming flows from value...")
-        
+
         incoming_flows = self._get_flows_from_node(node.value)
-        
+
         if DEBUG:
             debug_print("[DEBUG]   Incoming flows: {}".format(len(incoming_flows)))
 
@@ -337,14 +335,13 @@ class VulnerabilityFinder(ast.NodeVisitor):
                 debug_print("[DEBUG]   Variable '{}' is no longer tainted".format(target_name))
             del self.tainted_vars[target_name]
 
-
     def visit_Call(self, node):
         # Visit the call arguments to catch any nested calls
         self.generic_visit(node)
 
         # Get the function name being called
         func_name = self._extract_node_name(node.func)
-        
+
         if DEBUG:
             debug_print("[DEBUG] Function call at line {}: {}".format(node.lineno, func_name))
 
@@ -357,13 +354,13 @@ class VulnerabilityFinder(ast.NodeVisitor):
             # Collect flows from all arguments
             if DEBUG:
                 debug_print("[DEBUG]   Collecting flows from {} arguments".format(len(node.args)))
-            
+
             for arg in node.args:
                 all_flows.extend(self._get_flows_from_node(arg))
-            
+
             if DEBUG:
                 debug_print("[DEBUG]   Total flows collected from arguments: {}".format(len(all_flows)))
- 
+
             if not all_flows:
                 if DEBUG:
                     debug_print("[DEBUG]   No flows found, skipping sink check")
@@ -371,15 +368,15 @@ class VulnerabilityFinder(ast.NodeVisitor):
 
             # Check each flow for matching patterns
             sorted_flows = self._sort_flows(all_flows)
-            
+
             if DEBUG:
                 debug_print("[DEBUG]   Checking {} flows against patterns".format(len(sorted_flows)))
-            
+
             for flow in sorted_flows:
                 pattern = flow["pattern"]
                 if DEBUG:
                     debug_print("[DEBUG]     Checking pattern: {}".format(pattern.get('vulnerability')))
-                
+
                 if func_name in pattern.get("sinks", []):
                     if DEBUG:
                         debug_print("[DEBUG]     Pattern matches! Reporting vulnerability...")
@@ -387,12 +384,10 @@ class VulnerabilityFinder(ast.NodeVisitor):
                 else:
                     if DEBUG:
                         debug_print("[DEBUG]     Pattern does not match sink")
-    
+
     def visit_Expr(self, node):
         # Visit expressions to catch any nested calls or assignments
         self.generic_visit(node)
-
-
 
 
 def parse_slice_file(slice_file_path):
@@ -400,21 +395,21 @@ def parse_slice_file(slice_file_path):
     if not os.path.exists(slice_file_path):
         print("Error: File Not Found:", slice_file_path)
         sys.exit(1)
-    
+
     if DEBUG:
         debug_print("[DEBUG] Reading slice file: {}".format(slice_file_path))
-    
+
     try:
         # Read and parse the slice file
         with open(slice_file_path, "r") as f:
             slice_code = f.read()
-        
+
         if DEBUG:
             debug_print("[DEBUG] Slice file read successfully ({} bytes)".format(len(slice_code)))
             debug_print("[DEBUG] Parsing slice file...")
-        
+
         slice_ast = ast.parse(slice_code)
-        
+
         if DEBUG:
             debug_print("[DEBUG] Slice file parsed successfully")
     except SyntaxError as e:
@@ -430,15 +425,15 @@ def parse_patterns_file(patterns_file_path):
     if not os.path.exists(patterns_file_path):
         print("Error: File Not Found:", patterns_file_path)
         sys.exit(1)
-    
+
     if DEBUG:
         debug_print("[DEBUG] Reading patterns file: {}".format(patterns_file_path))
-    
+
     try:
         # Read and parse the patterns file
         with open(patterns_file_path, "r") as f:
             patterns = json.load(f)
-        
+
         if DEBUG:
             debug_print("[DEBUG] Patterns file loaded successfully ({} patterns)".format(len(patterns)))
             for i, p in enumerate(patterns):
@@ -454,20 +449,20 @@ def parse_patterns_file(patterns_file_path):
 def analyze_slice_with_patterns(slice_ast, patterns):
     if DEBUG:
         debug_print("[DEBUG] Initializing vulnerability finder...")
-    
+
     # Initialize the vulnerability finder with the given patterns
     analyser = VulnerabilityFinder(patterns)
 
     if DEBUG:
         debug_print("[DEBUG] Visiting AST to find vulnerabilities...")
-    
+
     # Visit the AST of the slice to find vulnerabilities
     analyser.visit(slice_ast)
 
     if DEBUG:
         debug_print("[DEBUG] AST visit complete")
         debug_print("[DEBUG] Final tainted variables: {}".format(list(analyser.tainted_vars.keys())))
-    
+
     # Return the found vulnerabilities
     return analyser.vulnerabilities
 
@@ -481,29 +476,28 @@ def output_analysis_results(results, slice_file_path):
         OUTPUT_DIR,
         os.path.splitext(os.path.basename(slice_file_path))[0] + ".output.json"
     )
-    
+
     if DEBUG:
         debug_print("[DEBUG] Writing results to: {}".format(output_file_path))
-        debug_print("[DEBUG] Number of vulnerabilities to write: {}".format(len(results)))
 
     # Write results to output file
     with open(output_file_path, "w") as f:
         json.dump(results, f, indent=4)
-    
+
     if DEBUG:
         debug_print("[DEBUG] Results written successfully")
 
 
 def main():
     global DEBUG_FILE
-    
+
     if len(sys.argv) != 3:
         print("Error: Incorrect Number of Arguments\nUsage: python ./py_analyser.py foo/slice_1.py bar/my_patterns.json")
         sys.exit(1)
-    
+
     slice_file_path = sys.argv[1]
     patterns_file_path = sys.argv[2]
-    
+
     # Open debug file if DEBUG is enabled
     if DEBUG:
         os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -513,8 +507,6 @@ def main():
         )
         DEBUG_FILE = open(debug_file_path, "w")
         debug_print("[DEBUG] Starting analysis...")
-        debug_print("[DEBUG] Slice file: {}".format(slice_file_path))
-        debug_print("[DEBUG] Patterns file: {}".format(patterns_file_path))
 
     try:
         # Read and Parse the slice file
@@ -525,13 +517,13 @@ def main():
 
         # Perform analysis based on the patterns
         results = analyze_slice_with_patterns(slice_ast, patterns)
-        
+
         if DEBUG:
             debug_print("[DEBUG] Analysis complete. Found {} vulnerabilities".format(len(results)))
 
         # Output the results of the analysis
         output_analysis_results(results, slice_file_path)
-        
+
         if DEBUG:
             debug_print("[DEBUG] Results written to output file")
     finally:
