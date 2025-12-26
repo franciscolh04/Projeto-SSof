@@ -1,143 +1,86 @@
+
+# Imports
 import ast
 import json
 import os
 import sys
+import copy
 
+
+# Output directory and debug flag
 OUTPUT_DIR = "./output"
-DEBUG_DIR = "./debug"
-DEBUG = True
-DEBUG_FILE = None
+DEBUG = False
 
-def debug_print(message):
-    """Print debug message to file if DEBUG is enabled"""
-    if DEBUG and DEBUG_FILE:
-        DEBUG_FILE.write(message + "\n")
-        DEBUG_FILE.flush()
 
+# AST visitor to find vulnerabilities
 class VulnerabilityFinder(ast.NodeVisitor):
     def __init__(self, patterns):
         self.patterns = patterns
         for i, p in enumerate(self.patterns):
             p['_index'] = i
 
-        self.tainted_vars = {}
-        self.vulnerabilities = []
-        self.assigned_vars = set()
+        self.tainted_vars = {}  # Tracks tainted variables
+        self.assigned_vars = set()  # Tracks assigned variables
+        self.vulnerabilities = []  # List of found vulnerabilities
+        self.guards = []  # Stack of guard flows
 
-        self.vuln_family_order = []
+        self.sources_map = {}  # Maps sources to patterns
+        self.sinks_map = {}  # Maps sinks to patterns
+        self.sanitizers_map = {}  # Maps sanitizers to patterns
 
-        self.sources_map = {}
-        self.sinks_map = {}
-        self.sanitizers_map = {}
+        self.vuln_family_order = []  # Order of vulnerability families
+        self.vulnerability_count = {}  # Counter for vulnerabilities
 
-        self.vulnerability_count = {}
+        self._build_patterns_maps()  # Build lookup maps
 
-        self._build_patterns_maps()
 
-        if DEBUG:
-            debug_print("[DEBUG] VulnerabilityFinder initialized with {} patterns".format(len(patterns)))
-            debug_print("[DEBUG] Sources: {}".format(list(self.sources_map.keys())))
-            debug_print("[DEBUG] Sinks: {}".format(list(self.sinks_map.keys())))
-            debug_print("[DEBUG] Sanitizers: {}".format(list(self.sanitizers_map.keys())))
-
+    # Build lookup maps for sources, sinks, and sanitizers
     def _build_patterns_maps(self):
-        if DEBUG:
-            debug_print("[DEBUG] Building pattern maps...")
-
         for pattern in self.patterns:
-            if DEBUG:
-                debug_print("[DEBUG]   Pattern: {}".format(pattern.get('vulnerability')))
+            # Map each source to its pattern
+            for source in pattern.get("sources", []):
+                self.sources_map.setdefault(source, []).append(pattern)
+            # Map each sanitizer to its pattern
+            for sanitizer in pattern.get("sanitizers", []):
+                self.sanitizers_map.setdefault(sanitizer, []).append(pattern)
+            # Map each sink to its pattern
+            for sink in pattern.get("sinks", []):
+                self.sinks_map.setdefault(sink, []).append(pattern)
 
-            # Build sources map
-            for source_name in pattern.get("sources", []):
-                if source_name not in self.sources_map:
-                    self.sources_map[source_name] = []
-                self.sources_map[source_name].append(pattern)
-                if DEBUG:
-                    debug_print("[DEBUG]     Added source: {}".format(source_name))
 
-            # Build sanitizers map
-            for sanitizer_name in pattern.get("sanitizers", []):
-                if sanitizer_name not in self.sanitizers_map:
-                    self.sanitizers_map[sanitizer_name] = []
-                self.sanitizers_map[sanitizer_name].append(pattern)
-                if DEBUG:
-                    debug_print("[DEBUG]     Added sanitizer: {}".format(sanitizer_name))
+    # Get the root variable name from an AST node
+    def _get_root_name(self, node):
+        # Return the root variable name for assignments and accesses
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            return self._get_root_name(node.value)
+        elif isinstance(node, ast.Subscript):
+            return self._get_root_name(node.value)
+        return None
 
-            # Build sinks map
-            for sink_name in pattern.get("sinks", []):
-                if sink_name not in self.sinks_map:
-                    self.sinks_map[sink_name] = []
-                self.sinks_map[sink_name].append(pattern)
-                if DEBUG:
-                    debug_print("[DEBUG]     Added sink: {}".format(sink_name))
 
-    def _extract_node_name(self, node):
-        result = None
-        if isinstance(node, ast.Name): # Variable or function name
-            result = node.id
-        elif isinstance(node, ast.Call): # Function call
-            result = self._extract_node_name(node.func)
-        elif isinstance(node, ast.Attribute): # Attribute access
-            value_name = self._extract_node_name(node.value)
-            if value_name:
-                result = f"{value_name}.{node.attr}"
-        elif isinstance(node, ast.Subscript): # Subscript access
-            result = self._extract_node_name(node.value)
+    # Extract function or method name from a call node
+    def _extract_call_name(self, node):
+        # Extracts the function or method name from a call node
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            return node.attr
+        return None
 
-        if DEBUG and result:
-            debug_print("[DEBUG]     Extracted node name: {} (type: {})".format(result, type(node).__name__))
 
-        return result
-
-    def _sort_flows(self, flows):
-        if DEBUG:
-            debug_print("[DEBUG]   Sorting {} flows...".format(len(flows)))
-
-        def sort_key(flow):
-            vuln_name = flow['pattern']['vulnerability']
-            # If the vulnerability family is known, get its index
-            if vuln_name in self.vuln_family_order:
-                history_index = self.vuln_family_order.index(vuln_name)
-            else:
-                # If it's new, it goes to the end of the history (but before other new ones with a higher index)
-                history_index = len(self.vuln_family_order)
-
-            # Use the index in the JSON file as a tiebreaker
-            json_index = flow['pattern']['_index']
-
-            if DEBUG:
-                debug_print("[DEBUG]     Flow '{}' -> sort_key=({}, {})".format(vuln_name, history_index, json_index))
-
-            return (history_index, json_index)
-
-        sorted_flows = sorted(flows, key=sort_key)
-
-        if DEBUG:
-            debug_print("[DEBUG]   Flows sorted")
-
-        return sorted_flows
-
-    def _get_flows_from_node(self, node):
+    # Recursively resolve data flows for a node
+    def _resolve_flows(self, node):
         flows = []
 
         if isinstance(node, ast.Name):
+            # Check if variable is already tainted
             var_name = node.id
-
-            if DEBUG:
-                debug_print("[DEBUG]     Getting flows from variable: {}".format(var_name))
-
-            # If the variable is tainted, copy all its flows
             if var_name in self.tainted_vars:
-                if DEBUG:
-                    debug_print("[DEBUG]       Variable is tainted with {} flow(s)".format(len(self.tainted_vars[var_name])))
-                for flow in self.tainted_vars[var_name]:
-                    flows.append(flow.copy())
-
-            # Check if the variable is a Source itself
+                flows.extend([copy.deepcopy(f) for f in self.tainted_vars[var_name]])
+            # Check if variable is an explicit source
             if var_name in self.sources_map:
-                if DEBUG:
-                    debug_print("[DEBUG]       Variable is a source")
                 for pattern in self.sources_map[var_name]:
                     flows.append({
                         "pattern": pattern,
@@ -145,12 +88,8 @@ class VulnerabilityFinder(ast.NodeVisitor):
                         "sanitizers": [],
                         "implicit": False
                     })
-
-            # Check if it is a Non-Instantiated Variable (Implicit Source)
-            if var_name not in self.assigned_vars and var_name not in self.sources_map:
-                if DEBUG:
-                    debug_print("[DEBUG]       Variable is implicit source (not assigned)")
-                # Add as source for all patterns
+            # If variable is not assigned, treat as generic source
+            if var_name not in self.assigned_vars:
                 for pattern in self.patterns:
                     flows.append({
                         "pattern": pattern,
@@ -159,407 +98,305 @@ class VulnerabilityFinder(ast.NodeVisitor):
                         "implicit": False
                     })
 
-        elif isinstance(node, ast.Call):
-            func_name = self._extract_node_name(node.func)
-            if DEBUG:
-                debug_print("[DEBUG]     Getting flows from Call: {}".format(func_name))
+        elif isinstance(node, ast.BinOp):
+            # Resolve flows for both sides of the binary operation
+            flows.extend(self._resolve_flows(node.left))
+            flows.extend(self._resolve_flows(node.right))
 
-            # Collect flows from arguments
+        elif isinstance(node, ast.Call):
+            # Get function/method name
+            func_name = self._extract_call_name(node.func)
+            # Resolve flows for all arguments
             arg_flows = []
             for arg in node.args:
-                arg_flows.extend(self._get_flows_from_node(arg))
-            
-            # Apply sanitization if this function is a sanitizer
-            if func_name in self.sanitizers_map:
-                if DEBUG:
-                    debug_print("[DEBUG]       Function is a sanitizer")
-                sanitized_flows = []
-                for flow in arg_flows:
-                    new_flow = flow.copy()
-                    # Ensure sanitizers list is a new list
-                    current_sanitizers = list(new_flow.get("sanitizers", []))
-                    
-                    if func_name in new_flow["pattern"].get("sanitizers", []):
-                        current_sanitizers.append([func_name, node.lineno])
-                    
-                    new_flow["sanitizers"] = current_sanitizers
-                    sanitized_flows.append(new_flow)
-                arg_flows = sanitized_flows
-
-            # Check if this function call is a Source
+                arg_flows.extend(self._resolve_flows(arg))
+            # If method call, propagate flows from the object
+            if isinstance(node.func, ast.Attribute):
+                arg_flows.extend(self._resolve_flows(node.func.value))
+            # If function is a source, add new flow
             if func_name in self.sources_map:
-                if DEBUG:
-                    debug_print("[DEBUG]       Function is a source")
                 for pattern in self.sources_map[func_name]:
-                    arg_flows.append({
+                    flows.append({
                         "pattern": pattern,
                         "source": [func_name, node.lineno],
                         "sanitizers": [],
                         "implicit": False
                     })
-            
-            flows.extend(arg_flows)
-
-        elif isinstance(node, ast.BinOp):
-            if DEBUG:
-                debug_print("[DEBUG]     Getting flows from BinOp")
-            flows.extend(self._get_flows_from_node(node.left))
-            flows.extend(self._get_flows_from_node(node.right))
-
-        elif isinstance(node, ast.UnaryOp):
-            if DEBUG:
-                debug_print("[DEBUG]     Getting flows from UnaryOp")
-            flows.extend(self._get_flows_from_node(node.operand))
-
-        elif isinstance(node, ast.Call):
-            if DEBUG:
-                debug_print("[DEBUG]     Getting flows from Call with {} args".format(len(node.args)))
-            for arg in node.args:
-                flows.extend(self._get_flows_from_node(arg))
+            # If function is a sanitizer, update flows accordingly
+            if func_name in self.sanitizers_map:
+                sanitized_flows = []
+                for flow in arg_flows:
+                    if func_name in flow["pattern"].get("sanitizers", []):
+                        new_flow = copy.deepcopy(flow)
+                        new_flow["sanitizers"].append([func_name, node.lineno])
+                        sanitized_flows.append(new_flow)
+                    else:
+                        sanitized_flows.append(flow)
+                flows.extend(sanitized_flows)
+            else:
+                flows.extend(arg_flows)
 
         elif isinstance(node, ast.Attribute):
-            if DEBUG:
-                debug_print("[DEBUG]     Getting flows from Attribute")
-            flows.extend(self._get_flows_from_node(node.value)) 
+            # Resolve flows for the base object
+            flows.extend(self._resolve_flows(node.value))
 
         elif isinstance(node, ast.Subscript):
-            if DEBUG:
-                debug_print("[DEBUG]     Getting flows from Subscript")
-            flows.extend(self._get_flows_from_node(node.value))
-
-        if DEBUG:
-            debug_print("[DEBUG]     Total flows collected: {}".format(len(flows)))
+            # Resolve flows for the base and the index
+            flows.extend(self._resolve_flows(node.value))
+            flows.extend(self._resolve_flows(node.slice))
 
         return flows
 
-    def _report_vulnerability(self, sink_name, sink_lineno, flow):
-        pattern = flow['pattern']
 
-        # Keep track of vulnerability family order
+    # Add implicit context from guards to flows
+    def _apply_implicit_context(self, flows):
+        # If there are no guards, return flows as is
+        if not self.guards:
+            return flows
+        guard_flows = []
+        for g_list in self.guards:
+            guard_flows.extend(g_list)
+        # If no guard flows, return flows as is
+        if not guard_flows:
+            return flows
+        new_flows = list(flows)
+        for g_flow in guard_flows:
+            # Mark guard flows as implicit
+            implicit_flow = copy.deepcopy(g_flow)
+            implicit_flow['implicit'] = True
+            new_flows.append(implicit_flow)
+        return new_flows
+
+
+    # Check if a node is a sink and report vulnerabilities
+    def _check_sinks(self, node_name, lineno, flows):
+        # If node is not a sink, do nothing
+        if node_name not in self.sinks_map:
+            return
+        final_flows = self._apply_implicit_context(flows)
+        unique_flows = self._sort_flows(final_flows)
+        for flow in unique_flows:
+            pattern = flow['pattern']
+            # Only report if node is a sink for this pattern
+            if node_name in pattern.get('sinks', []):
+                if flow['implicit'] and pattern.get('implicit') == 'no':
+                    continue
+                self._report_vulnerability(node_name, lineno, flow)
+
+
+    # Remove duplicate flows and sort them
+    def _sort_flows(self, flows):
+        unique = []
+        seen = set()
+        for f in flows:
+            # Create a unique signature for each flow
+            sanitizers_sig = tuple(tuple(s) for s in f['sanitizers'])
+            sig = (f['pattern']['_index'], tuple(f['source']), sanitizers_sig, f['implicit'])
+            if sig not in seen:
+                seen.add(sig)
+                unique.append(f)
+        def sort_key(f):
+            # Sort by family order and pattern index
+            vuln_name = f['pattern']['vulnerability']
+            if vuln_name in self.vuln_family_order:
+                h_idx = self.vuln_family_order.index(vuln_name)
+            else:
+                h_idx = 9999
+            return (h_idx, f['pattern']['_index'])
+        return sorted(unique, key=sort_key)
+
+
+    # Add a new vulnerability finding or update an existing one
+    def _report_vulnerability(self, sink_name, lineno, flow):
+        pattern = flow['pattern']
         vuln_name_base = pattern['vulnerability']
+        # Track the order of vulnerability families
         if vuln_name_base not in self.vuln_family_order:
             self.vuln_family_order.append(vuln_name_base)
-
-        source_id = flow['source']
-
-        if DEBUG:
-            debug_print("[DEBUG] Reporting vulnerability: {} at line {}".format(vuln_name_base, sink_lineno))
-            debug_print("[DEBUG]   Source: {}".format(source_id))
-            debug_print("[DEBUG]   Sink: {}".format(sink_name))
-            debug_print("[DEBUG]   Sanitizers: {}".format(flow['sanitizers']))
-            debug_print("[DEBUG]   Implicit: {}".format(flow['implicit']))
-
-        # Check if this vulnerability has already been reported
-        for vuln in self.vulnerabilities:
-            if (vuln['vulnerability'].startswith(vuln_name_base) and 
-                vuln['source'] == source_id and 
-                vuln['sink'] == [sink_name, sink_lineno]):
-
-                if DEBUG:
-                    debug_print("[DEBUG]   Vulnerability already reported, checking for new flow...")
-
-                # Add new flow if it's not already present
-                new_flow_entry = [
-                    "implicit" if flow['implicit'] else "explicit",
-                    list(flow['sanitizers']) # Ensure we store a copy
-                ]
-                if new_flow_entry not in vuln['flows']:
-                    vuln['flows'].append(new_flow_entry)
-                    if DEBUG:
-                        debug_print("[DEBUG]   Added new flow to existing vulnerability: {}".format(new_flow_entry))
-                else:
-                    if DEBUG:
-                        debug_print("[DEBUG]   Flow already exists, skipping: {}".format(new_flow_entry))
+        source_data = flow['source']
+        flow_data = [
+            "implicit" if flow['implicit'] else "explicit",
+            flow['sanitizers']
+        ]
+        # Check if this vulnerability already exists
+        for v in self.vulnerabilities:
+            if (v['vulnerability'].rsplit('_', 1)[0] == vuln_name_base and
+                v['source'] == source_data and
+                v['sink'] == [sink_name, lineno]):
+                if flow_data not in v['flows']:
+                    v['flows'].append(flow_data)
                 return
-
-        # If not found, create a new entry
+        # If new, increment count and add to list
         if vuln_name_base not in self.vulnerability_count:
             self.vulnerability_count[vuln_name_base] = 0
         self.vulnerability_count[vuln_name_base] += 1
-
         vuln_id = f"{vuln_name_base}_{self.vulnerability_count[vuln_name_base]}"
-
-        if DEBUG:
-            debug_print("[DEBUG]   Creating new vulnerability: {}".format(vuln_id))
-
-        # Create new vulnerability report entry and add to the list
-        vulnerability_report = {
+        self.vulnerabilities.append({
             "vulnerability": vuln_id,
-            "source": flow['source'],
-            "sink": [sink_name, sink_lineno],
-            "flows": [
-                [
-                    "implicit" if flow['implicit'] else "explicit",
-                    list(flow['sanitizers']) # Ensure we store a copy
-                ]
-            ]
-        }
-        self.vulnerabilities.append(vulnerability_report)
+            "source": source_data,
+            "sink": [sink_name, lineno],
+            "flows": [flow_data]
+        })
 
-        if DEBUG:
-            debug_print("[DEBUG]   Total vulnerabilities: {}".format(len(self.vulnerabilities)))
 
+    # Handle assignment statements
     def visit_Assign(self, node):
-        # Visit the value to catch any nested assignments
-        self.generic_visit(node)
+        # Resolve flows for right-hand side
+        rhs_flows = self._resolve_flows(node.value)
+        assigned_flows = self._apply_implicit_context(rhs_flows)
+        # Visit right-hand side for sinks
+        self.visit(node.value)
+        for target in node.targets:
+            # Get root variable name for each assignment target
+            root_name = self._get_root_name(target)
+            if root_name:
+                if isinstance(target, ast.Name):
+                    # Direct assignment to variable
+                    self.assigned_vars.add(root_name)
+                    self.tainted_vars[root_name] = copy.deepcopy(assigned_flows)
+                    self._check_sinks(root_name, node.lineno, assigned_flows)
+                elif isinstance(target, (ast.Attribute, ast.Subscript)):
+                    # Assignment to attribute or subscript
+                    if root_name not in self.tainted_vars:
+                        self.tainted_vars[root_name] = []
+                    self.tainted_vars[root_name].extend(copy.deepcopy(assigned_flows))
+                    if isinstance(target, ast.Subscript):
+                        # Add flows from index
+                        index_flows = self._resolve_flows(target.slice)
+                        self.tainted_vars[root_name].extend(copy.deepcopy(index_flows))
+                    self._check_sinks(root_name, node.lineno, self.tainted_vars[root_name])
+                    if isinstance(target, ast.Attribute):
+                        # Check if attribute is a sink
+                        attr_name = target.attr
+                        self._check_sinks(attr_name, node.lineno, assigned_flows)
+        for target in node.targets:
+            # Visit subscript indices
+            if isinstance(target, ast.Subscript):
+                self.visit(target.slice)
 
-        # Get Target and Value Names
-        if not isinstance(node.targets[0], ast.Name):
-            return
-        target_name = node.targets[0].id
-        value_name = self._extract_node_name(node.value)
 
-        if DEBUG:
-            debug_print("[DEBUG] Assignment at line {}: {} = {}".format(node.lineno, target_name, value_name))
-
-        # Mark the variable as assigned to avoid implicit source detection
-        self.assigned_vars.add(target_name)
-
-        if DEBUG:
-            debug_print("[DEBUG]   Getting incoming flows from value...")
-
-        # Get flows from value (handles sanitizers and sources recursively)
-        collected_flows = self._get_flows_from_node(node.value)
-
-        if DEBUG:
-            debug_print("[DEBUG]   Incoming flows: {}".format(len(collected_flows)))
-
-        # Assign the collected flows to the target variable
-        if collected_flows:
-            self.tainted_vars[target_name] = collected_flows
-            if DEBUG:
-                debug_print("[DEBUG]   Variable '{}' is now tainted with {} flow(s)".format(target_name, len(collected_flows)))
-
-            # If the target variable is a sink
-            if target_name in self.sinks_map:
-                if DEBUG:
-                    debug_print("[DEBUG]   Variable '{}' is a sink".format(target_name))
-
-                sorted_flows = self._sort_flows(collected_flows)
-                for flow in sorted_flows:
-                    # Check each flow for matching patterns
-                    if target_name in flow['pattern'].get('sinks', []):
-                        self._report_vulnerability(target_name, node.lineno, flow)
-
-        # If no tainted flows, remove the variable from tainted vars
-        elif target_name in self.tainted_vars:
-            if DEBUG:
-                debug_print("[DEBUG]   Variable '{}' is no longer tainted".format(target_name))
-            del self.tainted_vars[target_name]
-
+    # Handle function/method calls
     def visit_Call(self, node):
-        # Visit the call arguments to catch any nested calls
-        self.generic_visit(node)
-
-        # Get the function name being called
-        func_name = self._extract_node_name(node.func)
-
-        if DEBUG:
-            debug_print("[DEBUG] Function call at line {}: {}".format(node.lineno, func_name))
-
-        # Check if the function called is a sink
-        if func_name in self.sinks_map:
-            if DEBUG:
-                debug_print("[DEBUG]   Function '{}' is a sink".format(func_name))
-            all_flows = []
-
-            # Collect flows from all arguments
-            if DEBUG:
-                debug_print("[DEBUG]   Collecting flows from {} arguments".format(len(node.args)))
-
+        func_name = self._extract_call_name(node.func)
+        # If function is a sink, check arguments
+        if func_name and func_name in self.sinks_map:
+            arg_flows = []
             for arg in node.args:
-                all_flows.extend(self._get_flows_from_node(arg))
-
-            if DEBUG:
-                debug_print("[DEBUG]   Total flows collected from arguments: {}".format(len(all_flows)))
-
-            if not all_flows:
-                if DEBUG:
-                    debug_print("[DEBUG]   No flows found, skipping sink check")
-                return
-
-            # Check each flow for matching patterns
-            sorted_flows = self._sort_flows(all_flows)
-
-            if DEBUG:
-                debug_print("[DEBUG]   Checking {} flows against patterns".format(len(sorted_flows)))
-
-            for flow in sorted_flows:
-                pattern = flow["pattern"]
-                if DEBUG:
-                    debug_print("[DEBUG]     Checking pattern: {}".format(pattern.get('vulnerability')))
-
-                if func_name in pattern.get("sinks", []):
-                    if DEBUG:
-                        debug_print("[DEBUG]     Pattern matches! Reporting vulnerability...")
-                    self._report_vulnerability(func_name, node.lineno, flow)
-                else:
-                    if DEBUG:
-                        debug_print("[DEBUG]     Pattern does not match sink")
-
-    def visit_Expr(self, node):
-        # Visit expressions to catch any nested calls or assignments
+                arg_flows.extend(self._resolve_flows(arg))
+            self._check_sinks(func_name, node.lineno, arg_flows)
+        # Visit all children nodes
         self.generic_visit(node)
 
 
-def parse_slice_file(slice_file_path):
-    # Check if the file exists
-    if not os.path.exists(slice_file_path):
-        print("Error: File Not Found:", slice_file_path)
-        sys.exit(1)
-
-    if DEBUG:
-        debug_print("[DEBUG] Reading slice file: {}".format(slice_file_path))
-
-    try:
-        # Read and parse the slice file
-        with open(slice_file_path, "r") as f:
-            slice_code = f.read()
-
-        if DEBUG:
-            debug_print("[DEBUG] Slice file read successfully ({} bytes)".format(len(slice_code)))
-            debug_print("[DEBUG] Parsing slice file...")
-
-        slice_ast = ast.parse(slice_code)
-
-        if DEBUG:
-            debug_print("[DEBUG] Slice file parsed successfully")
-    except SyntaxError as e:
-        print("Error: Syntax Error in Slice File:", slice_file_path)
-        print("Details:", e)
-        sys.exit(1)
-
-    return slice_ast
+    # Handle if statements and merge taint states
+    def visit_If(self, node):
+        # Resolve flows for condition
+        cond_flows = self._resolve_flows(node.test)
+        self.guards.append(cond_flows)
+        # Save state before if-branch
+        state_before = {k: [copy.deepcopy(f) for f in v] for k, v in self.tainted_vars.items()}
+        # Visit if-branch
+        for stmt in node.body:
+            self.visit(stmt)
+        # Save state after if-branch
+        state_after_if = {k: [copy.deepcopy(f) for f in v] for k, v in self.tainted_vars.items()}
+        # Restore state and visit else-branch
+        self.tainted_vars = {k: [copy.deepcopy(f) for f in v] for k, v in state_before.items()}
+        for stmt in node.orelse:
+            self.visit(stmt)
+        # Save state after else-branch
+        state_after_else = {k: [copy.deepcopy(f) for f in v] for k, v in self.tainted_vars.items()}
+        # Merge taint states from both branches
+        self.tainted_vars = self._merge_states(state_after_if, state_after_else)
+        self.guards.pop()
 
 
-def parse_patterns_file(patterns_file_path):
-    # Check if the file exists
-    if not os.path.exists(patterns_file_path):
-        print("Error: File Not Found:", patterns_file_path)
-        sys.exit(1)
-
-    if DEBUG:
-        debug_print("[DEBUG] Reading patterns file: {}".format(patterns_file_path))
-
-    try:
-        # Read and parse the patterns file
-        with open(patterns_file_path, "r") as f:
-            patterns = json.load(f)
-
-        if DEBUG:
-            debug_print("[DEBUG] Patterns file loaded successfully ({} patterns)".format(len(patterns)))
-            for i, p in enumerate(patterns):
-                debug_print("[DEBUG]   Pattern {}: {}".format(i+1, p.get('vulnerability')))
-    except json.JSONDecodeError as e:
-        print("Error: Invalid JSON in Patterns File:", patterns_file_path)
-        print("Details:", e)
-        sys.exit(1)
-
-    return patterns
+    # Merge taint states from two branches
+    def _merge_states(self, state1, state2):
+        # Merge flows for all variable keys
+        all_keys = set(state1.keys()) | set(state2.keys())
+        merged = {}
+        for k in all_keys:
+            flows1 = state1.get(k, [])
+            flows2 = state2.get(k, [])
+            merged[k] = flows1 + flows2
+        return merged
 
 
-def analyze_slice_with_patterns(slice_ast, patterns):
-    if DEBUG:
-        debug_print("[DEBUG] Initializing vulnerability finder...")
+    # Handle while loops with fixed-point iteration
+    def visit_While(self, node):
+        # Fixed-point iteration for while loops (max 10)
+        for _ in range(10):
+            # Save state before loop
+            state_before = json.dumps(self.tainted_vars, default=str, sort_keys=True)
+            # Resolve flows for loop condition
+            cond_flows = self._resolve_flows(node.test)
+            self.guards.append(cond_flows)
+            # Visit loop body
+            for stmt in node.body:
+                self.visit(stmt)
+            self.guards.pop()
+            # Save state after loop
+            state_after = json.dumps(self.tainted_vars, default=str, sort_keys=True)
+            # Stop if state converges
+            if state_before == state_after:
+                break
+    
 
-    # Initialize the vulnerability finder with the given patterns
-    analyser = VulnerabilityFinder(patterns)
+    # Return sorted list of vulnerabilities for output
+    def get_sorted_results(self):
+        def sort_key(vuln):
+            vuln_id = vuln['vulnerability']
+            family = vuln_id.rsplit('_', 1)[0]
+            if family in self.vuln_family_order:
+                family_idx = self.vuln_family_order.index(family)
+            else:
+                family_idx = 9999
+            return (family_idx, vuln_id)
+        # Return sorted vulnerabilities for output
+        return sorted(self.vulnerabilities, key=sort_key)
 
-    if DEBUG:
-        debug_print("[DEBUG] Visiting AST to find vulnerabilities...")
+# Parse a Python file and return its AST
+def parse_slice_file(path):
+    with open(path, "r") as f:
+        # Parse file contents to AST
+        return ast.parse(f.read())
 
-    # Visit the AST of the slice to find vulnerabilities
-    analyser.visit(slice_ast)
+# Parse the patterns JSON file
+def parse_patterns_file(path):
+    with open(path, "r") as f:
+        # Load JSON patterns
+        return json.load(f)
 
-    if DEBUG:
-        debug_print("[DEBUG] AST visit complete")
-        debug_print("[DEBUG] Final tainted variables: {}".format(list(analyser.tainted_vars.keys())))
-
-    # Sort vulnerabilities to ensure deterministic output grouped by vulnerability type
-    def sort_key(vuln):
-        v_id = vuln['vulnerability']
-        # Split by last underscore to separate name and count
-        if '_' in v_id:
-            name, num = v_id.rsplit('_', 1)
-            if num.isdigit():
-                # Primary key: Index in family order
-                if name in analyser.vuln_family_order:
-                    family_index = analyser.vuln_family_order.index(name)
-                else:
-                    family_index = float('inf') # Should not happen
-                
-                return (family_index, int(num))
-        return (float('inf'), 0)
-
-    analyser.vulnerabilities.sort(key=sort_key)
-
-    # Return the found vulnerabilities
-    return analyser.vulnerabilities
-
-
-def output_analysis_results(results, slice_file_path):
-    # Create output directory if it doesn't exist
+# Write results to output file
+def output_results(results, path):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    # Build output file path
-    output_file_path = os.path.join(
-        OUTPUT_DIR,
-        os.path.splitext(os.path.basename(slice_file_path))[0] + ".output.json"
-    )
-
-    if DEBUG:
-        debug_print("[DEBUG] Writing results to: {}".format(output_file_path))
-
-    # Write results to output file
-    with open(output_file_path, "w") as f:
+    out_path = os.path.join(OUTPUT_DIR, os.path.splitext(os.path.basename(path))[0] + ".output.json")
+    with open(out_path, "w") as f:
+        # Dump results as pretty JSON
         json.dump(results, f, indent=4)
 
-    if DEBUG:
-        debug_print("[DEBUG] Results written successfully")
 
-
+# Main entry point
 def main():
-    global DEBUG_FILE
-
     if len(sys.argv) != 3:
-        print("Error: Incorrect Number of Arguments\nUsage: python ./py_analyser.py foo/slice_1.py bar/my_patterns.json")
-        sys.exit(1)
-
-    slice_file_path = sys.argv[1]
-    patterns_file_path = sys.argv[2]
-
-    # Open debug file if DEBUG is enabled
-    if DEBUG:
-        os.makedirs(DEBUG_DIR, exist_ok=True)
-        debug_file_path = os.path.join(
-            DEBUG_DIR,
-            os.path.splitext(os.path.basename(slice_file_path))[0] + ".debug.txt"
-        )
-        DEBUG_FILE = open(debug_file_path, "w")
-        debug_print("[DEBUG] Starting analysis...")
-
+        return
+    slice_path, patterns_path = sys.argv[1], sys.argv[2]
     try:
-        # Read and Parse the slice file
-        slice_ast = parse_slice_file(slice_file_path)
+        # Parse input files
+        slice_ast = parse_slice_file(slice_path)
+        patterns = parse_patterns_file(patterns_path)
+        # Run analysis
+        analyser = VulnerabilityFinder(patterns)
+        analyser.visit(slice_ast)
+        final_results = analyser.get_sorted_results()
+        # Output results
+        output_results(final_results, slice_path)
+    except Exception as e:
+        # Print error if any
+        print(f"Error: {e}")
 
-        # Read and Parse the patterns file
-        patterns = parse_patterns_file(patterns_file_path)
 
-        # Perform analysis based on the patterns
-        results = analyze_slice_with_patterns(slice_ast, patterns)
-
-        if DEBUG:
-            debug_print("[DEBUG] Analysis complete. Found {} vulnerabilities".format(len(results)))
-
-        # Output the results of the analysis
-        output_analysis_results(results, slice_file_path)
-
-        if DEBUG:
-            debug_print("[DEBUG] Results written to output file")
-    finally:
-        # Close debug file
-        if DEBUG and DEBUG_FILE:
-            DEBUG_FILE.close()
-
+# Run main if executed as script
 if __name__ == "__main__":
     main()

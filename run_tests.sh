@@ -1,83 +1,98 @@
 #!/bin/bash
 
-# Color Codes
+
+# Color codes for output formatting
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Paths
+
+# Paths to main files and directories
 ANALYSER="./py_analyser.py"
 OUTPUT_DIR="./output"
 SLICES_DIR="./slices"
 
-# Counters
+
+# Test counters
 PASSED=0
 FAILED=0
 TOTAL=0
 
+
+# Print test suite header
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}      STARTING PY_ANALYSER TESTS     ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
-# Create output directory if it doesn't exist
+
+# Ensure output directory exists
 mkdir -p "$OUTPUT_DIR"
 
-# Python function for robust JSON comparison
+
+# Compare two JSON files after recursively sorting them
 compare_json() {
     python3 -c "
 import sys, json
+def sort_json(obj):
+    if isinstance(obj, dict):
+        return {k: sort_json(obj[k]) for k in sorted(obj)}
+    elif isinstance(obj, list):
+        try:
+            return sorted((sort_json(x) for x in obj), key=lambda x: json.dumps(x, sort_keys=True))
+        except Exception:
+            return obj
+    else:
+        return obj
 try:
     with open('$1') as f1, open('$2') as f2:
-        j1 = json.load(f1)
-        j2 = json.load(f2)
-        # Compara as estruturas de dados Python diretamente
-        # Nota: json.load() carrega arrays (listas) e objetos (dicionários)
-        # A comparação de listas aqui respeita a ordem, tal como pretendido.
+        j1 = sort_json(json.load(f1))
+        j2 = sort_json(json.load(f2))
         print(j1 == j2)
 except Exception as e:
-    # Se falhar a ler ou parsear, consideramos falha na comparação
     print('False')
 "
 }
 
-# We use Process Substitution to avoid the subshell and keep variables
+
+# Iterate over all Python slice files and run tests
 while read slice_file; do
-    
-    # If the line is empty (end of find), continue
+    # Skip empty lines
     if [ -z "$slice_file" ]; then continue; fi
 
     TOTAL=$((TOTAL+1))
-    
-    # Build associated file names
+
+    # Build file names for each test case
     base_name=$(basename "$slice_file" .py)
     dir_name=$(dirname "$slice_file")
-    
+
     patterns_file="${dir_name}/${base_name}.patterns.json"
     expected_output_file="${dir_name}/${base_name}.output.json"
     generated_output_file="${OUTPUT_DIR}/${base_name}.output.json"
 
-    # Check if necessary files exist
+    # Skip test if required files are missing
     if [ ! -f "$patterns_file" ] || [ ! -f "$expected_output_file" ]; then
         echo -e "${YELLOW}[SKIP]${NC} Missing files for: $base_name"
-        TOTAL=$((TOTAL-1)) # Do not count as test if files are missing
+        TOTAL=$((TOTAL-1))
         continue
     fi
 
-    # Run the Analyser
+    # Run the analyser script
     python3 "$ANALYSER" "$slice_file" "$patterns_file" > /dev/null 2>&1
     exit_code=$?
 
+    # Check for execution errors
     if [ $exit_code -ne 0 ]; then
         echo -e "${RED}[FAIL]${NC} Execution error in slice: $base_name (Code: $exit_code)"
         FAILED=$((FAILED+1))
         continue
     fi
 
-    # Compare the generated result with the expected one
+    # Compare generated and expected outputs
     result=$(compare_json "$expected_output_file" "$generated_output_file")
 
+    # Print test result
     if [ "$result" == "True" ]; then
         echo -e "${GREEN}[PASS]${NC} $base_name"
         PASSED=$((PASSED+1))
@@ -90,6 +105,8 @@ while read slice_file; do
 
 done < <(find "$SLICES_DIR" -type f -name "*.py" | sort)
 
+
+# Print summary of test results
 echo -e "${BLUE}========================================${NC}"
 echo -e "Test Summary:"
 echo -e "Total:  $TOTAL"
