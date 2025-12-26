@@ -159,6 +159,47 @@ class VulnerabilityFinder(ast.NodeVisitor):
                         "implicit": False
                     })
 
+        elif isinstance(node, ast.Call):
+            func_name = self._extract_node_name(node.func)
+            if DEBUG:
+                debug_print("[DEBUG]     Getting flows from Call: {}".format(func_name))
+
+            # Collect flows from arguments
+            arg_flows = []
+            for arg in node.args:
+                arg_flows.extend(self._get_flows_from_node(arg))
+            
+            # Apply sanitization if this function is a sanitizer
+            if func_name in self.sanitizers_map:
+                if DEBUG:
+                    debug_print("[DEBUG]       Function is a sanitizer")
+                sanitized_flows = []
+                for flow in arg_flows:
+                    new_flow = flow.copy()
+                    # Ensure sanitizers list is a new list
+                    current_sanitizers = list(new_flow.get("sanitizers", []))
+                    
+                    if func_name in new_flow["pattern"].get("sanitizers", []):
+                        current_sanitizers.append([func_name, node.lineno])
+                    
+                    new_flow["sanitizers"] = current_sanitizers
+                    sanitized_flows.append(new_flow)
+                arg_flows = sanitized_flows
+
+            # Check if this function call is a Source
+            if func_name in self.sources_map:
+                if DEBUG:
+                    debug_print("[DEBUG]       Function is a source")
+                for pattern in self.sources_map[func_name]:
+                    arg_flows.append({
+                        "pattern": pattern,
+                        "source": [func_name, node.lineno],
+                        "sanitizers": [],
+                        "implicit": False
+                    })
+            
+            flows.extend(arg_flows)
+
         elif isinstance(node, ast.BinOp):
             if DEBUG:
                 debug_print("[DEBUG]     Getting flows from BinOp")
@@ -220,15 +261,15 @@ class VulnerabilityFinder(ast.NodeVisitor):
                 # Add new flow if it's not already present
                 new_flow_entry = [
                     "implicit" if flow['implicit'] else "explicit",
-                    flow['sanitizers']
+                    list(flow['sanitizers']) # Ensure we store a copy
                 ]
                 if new_flow_entry not in vuln['flows']:
                     vuln['flows'].append(new_flow_entry)
                     if DEBUG:
-                        debug_print("[DEBUG]   Added new flow to existing vulnerability")
+                        debug_print("[DEBUG]   Added new flow to existing vulnerability: {}".format(new_flow_entry))
                 else:
                     if DEBUG:
-                        debug_print("[DEBUG]   Flow already exists, skipping")
+                        debug_print("[DEBUG]   Flow already exists, skipping: {}".format(new_flow_entry))
                 return
 
         # If not found, create a new entry
@@ -249,7 +290,7 @@ class VulnerabilityFinder(ast.NodeVisitor):
             "flows": [
                 [
                     "implicit" if flow['implicit'] else "explicit",
-                    flow['sanitizers']
+                    list(flow['sanitizers']) # Ensure we store a copy
                 ]
             ]
         }
@@ -274,43 +315,14 @@ class VulnerabilityFinder(ast.NodeVisitor):
         # Mark the variable as assigned to avoid implicit source detection
         self.assigned_vars.add(target_name)
 
-        # Initialize collected flows for this assignment
-        collected_flows = []
-
         if DEBUG:
             debug_print("[DEBUG]   Getting incoming flows from value...")
 
-        incoming_flows = self._get_flows_from_node(node.value)
+        # Get flows from value (handles sanitizers and sources recursively)
+        collected_flows = self._get_flows_from_node(node.value)
 
         if DEBUG:
-            debug_print("[DEBUG]   Incoming flows: {}".format(len(incoming_flows)))
-
-        # If the value is a sanitizer
-        if value_name in self.sanitizers_map:
-            if DEBUG:
-                debug_print("[DEBUG]   Sanitizer detected: {}".format(value_name))
-            for flow in incoming_flows:
-                # If the sanitizer is part of the pattern, add it to the flow
-                if value_name in flow["pattern"].get("sanitizers", []):
-                    flow["sanitizers"] = flow["sanitizers"] + [[value_name, node.lineno]]
-                collected_flows.append(flow)
-        else:
-            # If not a sanitizer, propagate the flows as they are
-            if DEBUG and incoming_flows:
-                debug_print("[DEBUG]   Propagating {} flows without sanitization".format(len(incoming_flows)))
-            collected_flows.extend(incoming_flows)
-
-        # If the value assigned is from a source
-        if value_name in self.sources_map:
-            if DEBUG:
-                debug_print("[DEBUG]   Source detected: {}".format(value_name))
-            for pattern in self.sources_map[value_name]:
-                collected_flows.append({
-                    "pattern": pattern,
-                    "source": [value_name, node.lineno],
-                    "sanitizers": [],
-                    "implicit": False
-                })
+            debug_print("[DEBUG]   Incoming flows: {}".format(len(collected_flows)))
 
         # Assign the collected flows to the target variable
         if collected_flows:
@@ -462,6 +474,24 @@ def analyze_slice_with_patterns(slice_ast, patterns):
     if DEBUG:
         debug_print("[DEBUG] AST visit complete")
         debug_print("[DEBUG] Final tainted variables: {}".format(list(analyser.tainted_vars.keys())))
+
+    # Sort vulnerabilities to ensure deterministic output grouped by vulnerability type
+    def sort_key(vuln):
+        v_id = vuln['vulnerability']
+        # Split by last underscore to separate name and count
+        if '_' in v_id:
+            name, num = v_id.rsplit('_', 1)
+            if num.isdigit():
+                # Primary key: Index in family order
+                if name in analyser.vuln_family_order:
+                    family_index = analyser.vuln_family_order.index(name)
+                else:
+                    family_index = float('inf') # Should not happen
+                
+                return (family_index, int(num))
+        return (float('inf'), 0)
+
+    analyser.vulnerabilities.sort(key=sort_key)
 
     # Return the found vulnerabilities
     return analyser.vulnerabilities
