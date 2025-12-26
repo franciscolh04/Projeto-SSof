@@ -290,37 +290,57 @@ class VulnerabilityFinder(ast.NodeVisitor):
 
     # Handle if statements and merge taint states
     def visit_If(self, node):
-        # Resolve flows for condition
-        cond_flows = self._resolve_flows(node.test)
-        self.guards.append(cond_flows)
-        # Save state before if-branch
-        state_before = {k: [copy.deepcopy(f) for f in v] for k, v in self.tainted_vars.items()}
-        # Visit if-branch
-        for stmt in node.body:
-            self.visit(stmt)
-        # Save state after if-branch
-        state_after_if = {k: [copy.deepcopy(f) for f in v] for k, v in self.tainted_vars.items()}
-        # Restore state and visit else-branch
-        self.tainted_vars = {k: [copy.deepcopy(f) for f in v] for k, v in state_before.items()}
-        for stmt in node.orelse:
-            self.visit(stmt)
-        # Save state after else-branch
-        state_after_else = {k: [copy.deepcopy(f) for f in v] for k, v in self.tainted_vars.items()}
-        # Merge taint states from both branches
-        self.tainted_vars = self._merge_states(state_after_if, state_after_else)
-        self.guards.pop()
-
-
-    # Merge taint states from two branches
-    def _merge_states(self, state1, state2):
-        # Merge flows for all variable keys
-        all_keys = set(state1.keys()) | set(state2.keys())
-        merged = {}
-        for k in all_keys:
-            flows1 = state1.get(k, [])
-            flows2 = state2.get(k, [])
-            merged[k] = flows1 + flows2
-        return merged
+        # Save current state before entering branches
+        assigned_before = self.assigned_vars.copy()
+        tainted_before = copy.deepcopy(self.tainted_vars)
+        
+        # Visit the if branch
+        for child in node.body:
+            self.visit(child)
+        assigned_after_if = self.assigned_vars.copy()
+        tainted_after_if = copy.deepcopy(self.tainted_vars)
+        
+        # Reset to before state and visit else branch (if exists)
+        self.assigned_vars = assigned_before.copy()
+        self.tainted_vars = copy.deepcopy(tainted_before)
+        
+        if node.orelse:
+            for child in node.orelse:
+                self.visit(child)
+            assigned_after_else = self.assigned_vars.copy()
+            tainted_after_else = copy.deepcopy(self.tainted_vars)
+            
+            # After if-else, merge the states:
+            # 1. Only variables assigned in BOTH branches are definitely assigned
+            self.assigned_vars = assigned_after_if & assigned_after_else
+            
+            # 2. Merge tainted_vars: collect flows from both branches
+            all_vars = set(tainted_after_if.keys()) | set(tainted_after_else.keys())
+            merged_tainted = {}
+            for var in all_vars:
+                flows_if = tainted_after_if.get(var, [])
+                flows_else = tainted_after_else.get(var, [])
+                # Combine flows from both branches (union)
+                all_flows = flows_if + flows_else
+                if all_flows:
+                    merged_tainted[var] = all_flows
+            self.tainted_vars = merged_tainted
+        else:
+            # If there's no else, we can't assume variables are assigned
+            # (because the if might not execute)
+            self.assigned_vars = assigned_before
+            
+            # For tainted_vars, we need to keep flows from before AND after the if
+            all_vars = set(tainted_before.keys()) | set(tainted_after_if.keys())
+            merged_tainted = {}
+            for var in all_vars:
+                flows_before = tainted_before.get(var, [])
+                flows_after = tainted_after_if.get(var, [])
+                # Combine flows from both paths
+                all_flows = flows_before + flows_after
+                if all_flows:
+                    merged_tainted[var] = all_flows
+            self.tainted_vars = merged_tainted
 
 
     # Handle while loops with fixed-point iteration
