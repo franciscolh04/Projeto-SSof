@@ -9,8 +9,6 @@ import copy
 
 # Output directory and debug flag
 OUTPUT_DIR = "./output"
-DEBUG = False
-
 
 # AST visitor to find vulnerabilities
 class VulnerabilityFinder(ast.NodeVisitor):
