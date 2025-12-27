@@ -129,8 +129,8 @@ class VulnerabilityFinder(ast.NodeVisitor):
                 sanitized_flows = []
                 for flow in arg_flows:
                     if func_name in flow["pattern"].get("sanitizers", []):
-                        # FIX 1: For explicit flows, avoid idempotent sanitization (stacking the same sanitizer)
-                        # This prevents infinite growth in loops like a = s(a) for tests 5a/5b.
+                        # For explicit flows, avoid idempotent sanitization (stacking the same sanitizer)
+                        # This prevents infinite growth in loops like a = s(a)
                         if flow["pattern"].get("implicit") == "no":
                             already_present = any(s[0] == func_name for s in flow["sanitizers"])
                             if already_present:
