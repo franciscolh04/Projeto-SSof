@@ -1,4 +1,3 @@
-
 # Imports
 import ast
 import json
@@ -101,6 +100,11 @@ class VulnerabilityFinder(ast.NodeVisitor):
             flows.extend(self._resolve_flows(node.left))
             flows.extend(self._resolve_flows(node.right))
 
+        elif isinstance(node, ast.Compare):
+            flows.extend(self._resolve_flows(node.left))
+            for comparator in node.comparators:
+                flows.extend(self._resolve_flows(comparator))
+
         elif isinstance(node, ast.Call):
             # Get function/method name
             func_name = self._extract_call_name(node.func)
@@ -125,6 +129,14 @@ class VulnerabilityFinder(ast.NodeVisitor):
                 sanitized_flows = []
                 for flow in arg_flows:
                     if func_name in flow["pattern"].get("sanitizers", []):
+                        # FIX 1: For explicit flows, avoid idempotent sanitization (stacking the same sanitizer)
+                        # This prevents infinite growth in loops like a = s(a) for tests 5a/5b.
+                        if flow["pattern"].get("implicit") == "no":
+                            already_present = any(s[0] == func_name for s in flow["sanitizers"])
+                            if already_present:
+                                sanitized_flows.append(flow)
+                                continue
+
                         new_flow = copy.deepcopy(flow)
                         new_flow["sanitizers"].append([func_name, node.lineno])
                         sanitized_flows.append(new_flow)
@@ -144,6 +156,21 @@ class VulnerabilityFinder(ast.NodeVisitor):
             flows.extend(self._resolve_flows(node.slice))
 
         return flows
+
+    # Remove duplicate flows by unique signature
+    def _deduplicate_flows(self, flows):
+        unique = []
+        seen = set()
+        for f in flows:
+            # Build a signature for each flow (pattern, source, sanitizers, implicit)
+            sanitizers_sig = tuple(tuple(s) for s in f['sanitizers'])
+            sig = (f['pattern']['_index'], tuple(f['source']), sanitizers_sig, f['implicit'])
+            # Only add flows that haven't been seen yet
+            if sig not in seen:
+                seen.add(sig)
+                unique.append(f)
+        # Return list of unique flows
+        return unique
 
 
     # Add implicit context from guards to flows
@@ -288,6 +315,10 @@ class VulnerabilityFinder(ast.NodeVisitor):
 
     # Handle if statements and merge taint states
     def visit_If(self, node):
+        # If the condition is tainted, all flows inside become implicit
+        cond_flows = self._resolve_flows(node.test)
+        self.guards.append(cond_flows)
+
         # Save current state before entering branches
         assigned_before = self.assigned_vars.copy()
         tainted_before = copy.deepcopy(self.tainted_vars)
@@ -318,10 +349,7 @@ class VulnerabilityFinder(ast.NodeVisitor):
             for var in all_vars:
                 flows_if = tainted_after_if.get(var, [])
                 flows_else = tainted_after_else.get(var, [])
-                # Combine flows from both branches (union)
-                all_flows = flows_if + flows_else
-                if all_flows:
-                    merged_tainted[var] = all_flows
+                merged_tainted[var] = self._deduplicate_flows(flows_if + flows_else)
             self.tainted_vars = merged_tainted
         else:
             # If there's no else, we can't assume variables are assigned
@@ -334,31 +362,55 @@ class VulnerabilityFinder(ast.NodeVisitor):
             for var in all_vars:
                 flows_before = tainted_before.get(var, [])
                 flows_after = tainted_after_if.get(var, [])
-                # Combine flows from both paths
-                all_flows = flows_before + flows_after
-                if all_flows:
-                    merged_tainted[var] = all_flows
+                merged_tainted[var] = self._deduplicate_flows(flows_before + flows_after)
             self.tainted_vars = merged_tainted
+        
+        self.guards.pop()
 
 
     # Handle while loops with fixed-point iteration
     def visit_While(self, node):
-        # Fixed-point iteration for while loops (max 10)
+        # A loop might run 0 times (keeping Pre-Loop state) or N times.
+        # We must maintain the union of Pre-Loop state and the state resulting from iterations.
+        
+        pre_loop_vars = copy.deepcopy(self.tainted_vars)
+        current_vars = copy.deepcopy(self.tainted_vars)
+
+        # Run up to 10 iterations to reach a fixed point
         for _ in range(10):
-            # Save state before loop
-            state_before = json.dumps(self.tainted_vars, default=str, sort_keys=True)
-            # Resolve flows for loop condition
+            # Start iteration with current assumption of variables
+            self.tainted_vars = copy.deepcopy(current_vars)
+            
+            # Treat loop condition as implicit flow
             cond_flows = self._resolve_flows(node.test)
             self.guards.append(cond_flows)
-            # Visit loop body
+
+            # Visit all statements in the loop body
             for stmt in node.body:
                 self.visit(stmt)
+
             self.guards.pop()
-            # Save state after loop
-            state_after = json.dumps(self.tainted_vars, default=str, sort_keys=True)
-            # Stop if state converges
-            if state_before == state_after:
+
+            # New_State = Pre_Loop U Body(Current_State)
+            # This ensures we capture the case where loop is skipped (Pre_Loop)
+            # and cases where loop runs (Body output).
+            next_state = {}
+            all_keys = set(pre_loop_vars.keys()) | set(self.tainted_vars.keys())
+            
+            for k in all_keys:
+                flows_pre = pre_loop_vars.get(k, [])
+                flows_body = self.tainted_vars.get(k, [])
+                next_state[k] = self._deduplicate_flows(flows_pre + flows_body)
+            
+            # Check for convergence
+            state_before_json = json.dumps(current_vars, default=str, sort_keys=True)
+            state_after_json = json.dumps(next_state, default=str, sort_keys=True)
+            
+            current_vars = next_state
+            if state_before_json == state_after_json:
                 break
+        
+        self.tainted_vars = current_vars
     
 
     # Return sorted list of vulnerabilities for output
