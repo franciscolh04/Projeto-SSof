@@ -24,6 +24,7 @@ class VulnerabilityFinder(ast.NodeVisitor):
         self.sources_map = {}  # Maps sources to patterns
         self.sinks_map = {}  # Maps sinks to patterns
         self.sanitizers_map = {}  # Maps sanitizers to patterns
+        self.guard_sanitizers = []
 
         self.vuln_family_order = []  # Order of vulnerability families
         self.vulnerability_count = {}  # Counter for vulnerabilities
@@ -55,6 +56,32 @@ class VulnerabilityFinder(ast.NodeVisitor):
         elif isinstance(node, ast.Subscript):
             return self._get_root_name(node.value)
         return None
+    
+    # Find sanitizers present in all explicit flows of a condition
+    def _get_common_sanitizers(self, flows):
+        if not flows:
+            return []
+
+        # Only explicit flows affect the sanitizer set; implicit flows
+        # (control-dependence baggage) must not remove sanitizers from the value.
+        explicit_flows = [f for f in flows if not f.get('implicit', False)]
+        
+        # Prefer explicit flows; if none exist, fall back to all flows.
+        target_flows = explicit_flows if explicit_flows else flows
+        
+        # Helper to convert sanitizer list [name, line] to tuple (name, line)
+        def to_tuple(s): return tuple(s)
+        
+        # Start with sanitizers from the first flow
+        common_set = set(to_tuple(s) for s in target_flows[0]['sanitizers'])
+        
+        # Intersect with sanitizers from remaining flows
+        for f in target_flows[1:]:
+            current_set = set(to_tuple(s) for s in f['sanitizers'])
+            common_set &= current_set
+            
+        # Convert back to list of lists [ [name, line], ... ]
+        return sorted([list(s) for s in common_set], key=lambda x: (x[1], x[0]))
 
 
     # Extract function or method name from a call node
@@ -185,12 +212,35 @@ class VulnerabilityFinder(ast.NodeVisitor):
         # If no guard flows, return flows as is
         if not guard_flows:
             return flows
+
+        # Collect active sanitizers from all guard levels
+        active_sanitizers = []
+        for s_list in self.guard_sanitizers:
+            active_sanitizers.extend(s_list)
+
         new_flows = list(flows)
         for g_flow in guard_flows:
             # Mark guard flows as implicit
             implicit_flow = copy.deepcopy(g_flow)
             implicit_flow['implicit'] = True
             new_flows.append(implicit_flow)
+            
+            # Add enriched implicit flow representing combined guard paths
+            # (e.g., loop guard + nested if guard)
+            enriched_implicit = copy.deepcopy(g_flow)
+            enriched_implicit['implicit'] = True
+            
+            # Apply sanitizers from surrounding guards
+            current_sanitizers = set(tuple(s) for s in enriched_implicit['sanitizers'])
+            for sanitizer in active_sanitizers:
+                s_tuple = tuple(sanitizer)
+                if s_tuple not in current_sanitizers:
+                    enriched_implicit['sanitizers'].append(sanitizer)
+                    current_sanitizers.add(s_tuple)
+            
+            # Always add; _deduplicate_flows will remove duplicates if raw == enriched
+            new_flows.append(enriched_implicit)
+            
         return new_flows
 
 
@@ -322,6 +372,9 @@ class VulnerabilityFinder(ast.NodeVisitor):
         cond_flows = self._resolve_flows(node.test)
         self.guards.append(cond_flows)
 
+        common_sanitizers = self._get_common_sanitizers(cond_flows)
+        self.guard_sanitizers.append(common_sanitizers)
+
         # Save current state before entering branches
         assigned_before = self.assigned_vars.copy()
         tainted_before = copy.deepcopy(self.tainted_vars)
@@ -369,6 +422,7 @@ class VulnerabilityFinder(ast.NodeVisitor):
             self.tainted_vars = merged_tainted
         
         self.guards.pop()
+        self.guard_sanitizers.pop()
 
 
     # Handle while loops with fixed-point iteration
@@ -387,12 +441,16 @@ class VulnerabilityFinder(ast.NodeVisitor):
             # Treat loop condition as implicit flow
             cond_flows = self._resolve_flows(node.test)
             self.guards.append(cond_flows)
+            
+            # Calculate and push common sanitizers
+            common_sanitizers = self._get_common_sanitizers(cond_flows)
+            self.guard_sanitizers.append(common_sanitizers)
 
-            # Visit all statements in the loop body
             for stmt in node.body:
                 self.visit(stmt)
 
             self.guards.pop()
+            self.guard_sanitizers.pop()
 
             # New_State = Pre_Loop U Body(Current_State)
             # This ensures we capture the case where loop is skipped (Pre_Loop)
