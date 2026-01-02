@@ -6,7 +6,7 @@ import sys
 import copy
 
 
-# Output directory and debug flag
+# Output directory
 OUTPUT_DIR = "./output"
 
 # AST visitor to find vulnerabilities
@@ -487,42 +487,94 @@ class VulnerabilityFinder(ast.NodeVisitor):
         # Return sorted vulnerabilities for output
         return sorted(self.vulnerabilities, key=sort_key)
 
+
 # Parse a Python file and return its AST
 def parse_slice_file(path):
-    with open(path, "r") as f:
-        # Parse file contents to AST
-        return ast.parse(f.read())
+    # Check if the file exists
+    if not os.path.exists(path):
+        print("Error: File Not Found:", path)
+        sys.exit(1)
+    
+    try:
+        # Read and parse the slice file
+        with open(path, "r") as f:
+            slice_code = f.read()
+        slice_ast = ast.parse(slice_code)
+    except SyntaxError as e:
+        print("Error: Syntax Error in Slice File:", path)
+        print("Details:", e)
+        sys.exit(1)
+
+    return slice_ast
+
 
 # Parse the patterns JSON file
 def parse_patterns_file(path):
-    with open(path, "r") as f:
-        # Load JSON patterns
-        return json.load(f)
+    # Check if the file exists
+    if not os.path.exists(path):
+        print("Error: File Not Found:", path)
+        sys.exit(1)
+    
+    try:
+        # Read and parse the patterns file
+        with open(path, "r") as f:
+            patterns = json.load(f)
+    except json.JSONDecodeError as e:
+        print("Error: Invalid JSON in Patterns File:", path)
+        print("Details:", e)
+        sys.exit(1)
+
+    return patterns
+
+
+# Analyze the slice AST with given patterns
+def analyze_slice_with_patterns(slice_ast, patterns):
+    # Initialize the vulnerability finder with the given patterns
+    analyser = VulnerabilityFinder(patterns)
+
+    # Visit the AST of the slice to find vulnerabilities
+    analyser.visit(slice_ast)
+
+    # Return the found vulnerabilities sorted
+    return analyser.get_sorted_results()
+
 
 # Write results to output file
 def output_results(results, path):
+    # Create output directory if it doesn't exist
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, os.path.splitext(os.path.basename(path))[0] + ".output.json")
+
+    # Build output file path
+    out_path = os.path.join(
+        OUTPUT_DIR,
+        os.path.splitext(os.path.basename(path))[0] + ".output.json"
+    )
+
+    # Write results to output file
     with open(out_path, "w") as f:
-        # Dump results as pretty JSON
         json.dump(results, f, indent=4)
 
 
 # Main entry point
 def main():
     if len(sys.argv) != 3:
-        return
+        print("Error: Incorrect Number of Arguments\nUsage: python ./py_analyser.py foo/slice_1.py bar/my_patterns.json")
+        sys.exit(1)
+
     slice_path, patterns_path = sys.argv[1], sys.argv[2]
+
     try:
-        # Parse input files
+        # Read and Parse the slice file
         slice_ast = parse_slice_file(slice_path)
+
+        # Read and Parse the patterns file
         patterns = parse_patterns_file(patterns_path)
-        # Run analysis
-        analyser = VulnerabilityFinder(patterns)
-        analyser.visit(slice_ast)
-        final_results = analyser.get_sorted_results()
-        # Output results
-        output_results(final_results, slice_path)
+
+        # Perform analysis based on the patterns
+        results = analyze_slice_with_patterns(slice_ast, patterns)
+
+        # Output the results of the analysis
+        output_results(results, slice_path)
     except Exception as e:
         # Print error if any
         print(f"Error: {e}")
