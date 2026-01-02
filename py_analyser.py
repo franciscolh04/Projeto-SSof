@@ -109,42 +109,43 @@ class VulnerabilityFinder(ast.NodeVisitor):
             # Get function/method name
             func_name = self._extract_call_name(node.func)
             # Resolve flows for all arguments
-            arg_flows = []
+            current_flows = []
             for arg in node.args:
-                arg_flows.extend(self._resolve_flows(arg))
-            # If method call, propagate flows from the object
-            if isinstance(node.func, ast.Attribute):
-                arg_flows.extend(self._resolve_flows(node.func.value))
+                current_flows.extend(self._resolve_flows(arg))
+
             # If function is a source, add new flow
             if func_name in self.sources_map:
                 for pattern in self.sources_map[func_name]:
-                    flows.append({
+                    current_flows.append({
                         "pattern": pattern,
                         "source": [func_name, node.lineno],
                         "sanitizers": [],
                         "implicit": False
                     })
+
+            # If method call, propagate flows from the object
+            if isinstance(node.func, ast.Attribute):
+                current_flows.extend(self._resolve_flows(node.func.value))
             # If function is a sanitizer, update flows accordingly
             if func_name in self.sanitizers_map:
                 sanitized_flows = []
-                for flow in arg_flows:
+                for flow in current_flows:
                     if func_name in flow["pattern"].get("sanitizers", []):
                         # For explicit flows, avoid idempotent sanitization (stacking the same sanitizer)
                         # This prevents infinite growth in loops like a = s(a)
-                        if flow["pattern"].get("implicit") == "no":
-                            already_present = any(s[0] == func_name for s in flow["sanitizers"])
-                            if already_present:
-                                sanitized_flows.append(flow)
-                                continue
+                        sanitizer_entry = [func_name, node.lineno]
+                        if sanitizer_entry in flow["sanitizers"]:
+                            sanitized_flows.append(flow)
+                            continue
 
                         new_flow = copy.deepcopy(flow)
-                        new_flow["sanitizers"].append([func_name, node.lineno])
+                        new_flow["sanitizers"].append(sanitizer_entry)
                         sanitized_flows.append(new_flow)
                     else:
                         sanitized_flows.append(flow)
                 flows.extend(sanitized_flows)
             else:
-                flows.extend(arg_flows)
+                flows.extend(current_flows)
 
         elif isinstance(node, ast.Attribute):
             # Resolve flows for the base object
@@ -289,11 +290,11 @@ class VulnerabilityFinder(ast.NodeVisitor):
                         # Add flows from index
                         index_flows = self._resolve_flows(target.slice)
                         self.tainted_vars[root_name].extend(copy.deepcopy(index_flows))
-                    self._check_sinks(root_name, node.lineno, self.tainted_vars[root_name])
                     if isinstance(target, ast.Attribute):
                         # Check if attribute is a sink
                         attr_name = target.attr
                         self._check_sinks(attr_name, node.lineno, assigned_flows)
+                    self._check_sinks(root_name, node.lineno, self.tainted_vars[root_name])
         for target in node.targets:
             # Visit subscript indices
             if isinstance(target, ast.Subscript):
@@ -303,14 +304,16 @@ class VulnerabilityFinder(ast.NodeVisitor):
     # Handle function/method calls
     def visit_Call(self, node):
         func_name = self._extract_call_name(node.func)
+
+        # Visit all children nodes
+        self.generic_visit(node)
+        
         # If function is a sink, check arguments
         if func_name and func_name in self.sinks_map:
             arg_flows = []
             for arg in node.args:
                 arg_flows.extend(self._resolve_flows(arg))
             self._check_sinks(func_name, node.lineno, arg_flows)
-        # Visit all children nodes
-        self.generic_visit(node)
 
 
     # Handle if statements and merge taint states
