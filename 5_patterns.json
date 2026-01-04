@@ -1,0 +1,159 @@
+[
+  {
+    "vulnerability": "SQL Injection",
+    "sources": [
+      "request.GET",
+      "request.POST",
+      "request.form",
+      "request.args.get",
+      "request.values.get",
+      "QueryDict",
+      "input"
+    ],
+    "sanitizers": [
+      "mogrify",
+      "escape_string",
+      "sanitize_sql",
+      "parameterize"
+    ],
+    "sinks": [
+      "execute",
+      "executemany",
+      "raw",
+      "RawSQL",
+      "cursor.execute"
+    ],
+    "implicit": "yes"
+  },
+  {
+    "vulnerability": "Cross-Site Scripting (XSS)",
+    "sources": [
+      "request.GET",
+      "request.POST",
+      "request.form",
+      "request.args.get",
+      "request.cookies.get",
+      "QueryDict",
+      "input"
+    ],
+    "sanitizers": [
+      "escape",
+      "escape_html",
+      "clean",
+      "bleach.clean",
+      "markupsafe.escape",
+      "html.escape"
+    ],
+    "sinks": [
+      "render_template_string",
+      "send_mail",
+      "HttpResponse",
+      "mark_safe",
+      "Markup",
+      "Response"
+    ],
+    "implicit": "yes"
+  },
+  {
+    "vulnerability": "Command Injection",
+    "sources": [
+      "request.GET",
+      "request.POST",
+      "request.args.get",
+      "request.form",
+      "input",
+      "sys.argv"
+    ],
+    "sanitizers": [
+      "shlex.quote",
+      "pipes.quote",
+      "validate_command",
+      "sanitize_shell"
+    ],
+    "sinks": [
+      "os.system",
+      "subprocess.call",
+      "subprocess.run",
+      "subprocess.Popen",
+      "eval",
+      "exec",
+      "os.popen"
+    ],
+    "implicit": "no"
+  },
+  {
+    "vulnerability": "Path Traversal",
+    "sources": [
+      "request.GET",
+      "request.POST",
+      "request.args.get",
+      "request.form.get",
+      "request.files",
+      "input"
+    ],
+    "sanitizers": [
+      "os.path.basename",
+      "secure_filename",
+      "werkzeug.utils.secure_filename",
+      "normalize_path"
+    ],
+    "sinks": [
+      "open",
+      "os.path.join",
+      "pathlib.Path",
+      "send_file",
+      "send_from_directory"
+    ],
+    "implicit": "yes"
+  },
+  {
+    "vulnerability": "Cross-Site Request Forgery (CSRF)",
+    "sources": [
+      "request.GET",
+      "request.POST",
+      "request.form",
+      "request.cookies",
+      "session"
+    ],
+    "sanitizers": [
+      "csrf_protect",
+      "check_csrf_token",
+      "verify_csrf",
+      "CSRFProtect",
+      "csrf_exempt"
+    ],
+    "sinks": [
+      "save",
+      "delete",
+      "update",
+      "create",
+      "commit"
+    ],
+    "implicit": "yes"
+  },
+  {
+    "vulnerability": "Buffer Overflow",
+    "sources": [
+      "request.GET",
+      "request.POST",
+      "request.data",
+      "request.files",
+      "input",
+      "sys.stdin.read"
+    ],
+    "sanitizers": [
+      "validate_size",
+      "check_buffer_length",
+      "limit_input_size",
+      "truncate"
+    ],
+    "sinks": [
+      "ctypes.create_string_buffer",
+      "array.array",
+      "struct.pack",
+      "bytearray",
+      "memoryview"
+    ],
+    "implicit": "no"
+  }
+]
