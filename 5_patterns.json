@@ -82,31 +82,6 @@
     "implicit": "no"
   },
   {
-    "vulnerability": "Path Traversal",
-    "sources": [
-      "request.GET",
-      "request.POST",
-      "request.args.get",
-      "request.form.get",
-      "request.files",
-      "input"
-    ],
-    "sanitizers": [
-      "os.path.basename",
-      "secure_filename",
-      "werkzeug.utils.secure_filename",
-      "normalize_path"
-    ],
-    "sinks": [
-      "open",
-      "os.path.join",
-      "pathlib.Path",
-      "send_file",
-      "send_from_directory"
-    ],
-    "implicit": "yes"
-  },
-  {
     "vulnerability": "Cross-Site Request Forgery (CSRF)",
     "sources": [
       "request.GET",
