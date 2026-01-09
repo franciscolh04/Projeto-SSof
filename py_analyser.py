@@ -16,20 +16,20 @@ class VulnerabilityFinder(ast.NodeVisitor):
         for i, p in enumerate(self.patterns):
             p['_index'] = i
 
-        self.tainted_vars = {}  # Tracks tainted variables
-        self.assigned_vars = set()  # Tracks assigned variables
-        self.vulnerabilities = []  # List of found vulnerabilities
-        self.guards = []  # Stack of guard flows
+        self.tainted_vars = {}         # Tracks tainted variables
+        self.assigned_vars = set()     # Tracks assigned variables
+        self.vulnerabilities = []      # List of found vulnerabilities
+        self.guards = []               # Stack of guard flows
 
-        self.sources_map = {}  # Maps sources to patterns
-        self.sinks_map = {}  # Maps sinks to patterns
-        self.sanitizers_map = {}  # Maps sanitizers to patterns
-        self.guard_sanitizers = []
+        self.sources_map = {}          # Maps sources to patterns
+        self.sinks_map = {}            # Maps sinks to patterns
+        self.sanitizers_map = {}       # Maps sanitizers to patterns
+        self.guard_sanitizers = []     # Stack of sanitizers in guards
 
-        self.vuln_family_order = []  # Order of vulnerability families
+        self.vuln_family_order = []    # Order of vulnerability families
         self.vulnerability_count = {}  # Counter for vulnerabilities
 
-        self._build_patterns_maps()  # Build lookup maps
+        self._build_patterns_maps()    # Build lookup maps
 
 
     # Build lookup maps for sources, sinks, and sanitizers
@@ -396,10 +396,10 @@ class VulnerabilityFinder(ast.NodeVisitor):
             tainted_after_else = copy.deepcopy(self.tainted_vars)
             
             # After if-else, merge the states:
-            # 1. Only variables assigned in BOTH branches are definitely assigned
+            # Only variables assigned in BOTH branches are definitely assigned
             self.assigned_vars = assigned_after_if & assigned_after_else
             
-            # 2. Merge tainted_vars: collect flows from both branches
+            # Merge tainted_vars: collect flows from both branches
             all_vars = set(tainted_after_if.keys()) | set(tainted_after_else.keys())
             merged_tainted = {}
             for var in all_vars:
