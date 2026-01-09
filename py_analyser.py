@@ -57,6 +57,14 @@ class VulnerabilityFinder(ast.NodeVisitor):
             return self._get_root_name(node.value)
         return None
     
+    # Check if a node is a constant True value
+    def _is_constant_true(self, node):
+        return isinstance(node, ast.Constant) and node.value is True
+    
+    # Check if a node is a constant False value
+    def _is_constant_false(self, node):
+        return isinstance(node, ast.Constant) and node.value is False
+    
     # Find sanitizers present in all explicit flows of a condition
     def _get_common_sanitizers(self, flows):
         if not flows:
@@ -131,6 +139,11 @@ class VulnerabilityFinder(ast.NodeVisitor):
             flows.extend(self._resolve_flows(node.left))
             for comparator in node.comparators:
                 flows.extend(self._resolve_flows(comparator))
+
+        elif isinstance(node, ast.BoolOp):
+            # Resolve flows for all values in boolean operation (and/or)
+            for value in node.values:
+                flows.extend(self._resolve_flows(value))
 
         elif isinstance(node, ast.Call):
             # Get function/method name
@@ -368,8 +381,26 @@ class VulnerabilityFinder(ast.NodeVisitor):
 
     # Handle if statements and merge taint states
     def visit_If(self, node):
+        # Check for constant conditions
+        if self._is_constant_true(node.test):
+            # Only visit the if-body, skip the else
+            for child in node.body:
+                self.visit(child)
+            return
+        
+        if self._is_constant_false(node.test):
+            # Only visit the else-body (if it exists), skip the if-body
+            if node.orelse:
+                for child in node.orelse:
+                    self.visit(child)
+            return
+        
         # If the condition is tainted, all flows inside become implicit
         cond_flows = self._resolve_flows(node.test)
+
+        # Check for sinks in the condition itself
+        self.visit(node.test)
+        
         self.guards.append(cond_flows)
 
         common_sanitizers = self._get_common_sanitizers(cond_flows)
@@ -427,6 +458,10 @@ class VulnerabilityFinder(ast.NodeVisitor):
 
     # Handle while loops with fixed-point iteration
     def visit_While(self, node):
+        # Check for constant False condition - loop never executes
+        if self._is_constant_false(node.test):
+            return
+        
         # A loop might run 0 times (keeping Pre-Loop state) or N times.
         # We must maintain the union of Pre-Loop state and the state resulting from iterations.
         
@@ -440,6 +475,10 @@ class VulnerabilityFinder(ast.NodeVisitor):
             
             # Treat loop condition as implicit flow
             cond_flows = self._resolve_flows(node.test)
+            
+            # Check for sinks in the condition itself
+            self.visit(node.test)
+            
             self.guards.append(cond_flows)
             
             # Calculate and push common sanitizers
